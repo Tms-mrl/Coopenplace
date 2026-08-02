@@ -1,0 +1,393 @@
+import { Hono } from 'hono';
+import type { AppEnv } from '../lib/types';
+import { bad, notFound, num, paymentRequired, str } from '../lib/http';
+import { getSubStatus, getUserAgency } from '../lib/subscription';
+import { parseArgenprop } from '../lib/argenprop';
+import { BOOKING_KINDS, COMPUTED_STATUS_SQL } from '../lib/propertyStatus';
+
+// Cartera de propiedades (módulo A para agencias, B para propietarios particulares).
+export const properties = new Hono<AppEnv>();
+
+const OPERATIONS = ['venta', 'alquiler', 'temporario'];
+// disponible/reservada/alquilada se calculan desde bookings (COMPUTED_STATUS_SQL);
+// solo estos dos son asignables a mano vía PATCH (vender / revertir venta).
+const MANUAL_STATUSES = ['disponible', 'vendida'];
+
+// amenities llega como array de keys → se guarda como JSON string (o null).
+function jsonAmenities(v: unknown): string | null {
+  return Array.isArray(v) ? JSON.stringify(v.filter((x) => typeof x === 'string').slice(0, 20)) : null;
+}
+
+// Propiedades que el user puede gestionar: las suyas (particular) + las de su agencia.
+properties.get('/mine', async (c) => {
+  const mine = await getUserAgency(c.env.DB, c.var.user.id);
+  const agencyId = mine?.agency.id ?? -1;
+  const res = await c.env.DB
+    .prepare(
+      `SELECT p.id, p.owner_kind, p.operation, p.kind, p.title, p.price, p.currency, p.price_period, p.city, p.province,
+              p.address, p.description, p.lat, p.lng, p.rooms, p.area_m2, p.bathrooms, p.capacity, p.amenities,
+              p.available_from, p.available_until,
+              ${COMPUTED_STATUS_SQL} AS status, p.published, p.archived_at, p.branch_id, b.name AS branch_name, p.created_at,
+              (SELECT r2_key FROM property_media pm WHERE pm.property_id = p.id ORDER BY pm.sort LIMIT 1) AS cover_key,
+              (SELECT COUNT(*) FROM property_media pm2 WHERE pm2.property_id = p.id) AS photos,
+              (SELECT COALESCE(SUM(count), 0) FROM property_views v WHERE v.property_id = p.id) AS views,
+              COALESCE((SELECT json_group_array(json_object('f', bk.from_date, 't', bk.to_date, 'k', bk.kind)) FROM bookings bk WHERE bk.property_id = p.id), '[]') AS bookings
+       FROM properties p LEFT JOIN branches b ON b.id = p.branch_id
+       WHERE p.owner_user_id = ? OR p.agency_id = ?
+       ORDER BY p.created_at DESC LIMIT 200`,
+    )
+    .bind(c.var.user.id, agencyId)
+    .all();
+  return c.json({ properties: res.results });
+});
+
+// Crear propiedad. scope='agency' la mete en la cartera de la inmobiliaria (gateada
+// por la suscripción); si no, es del propietario particular.
+properties.post('/', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const operation = str(body.operation, 20);
+  const title = str(body.title, 160);
+  if (!operation || !OPERATIONS.includes(operation)) return bad(c, 'operation inválida (venta|alquiler|temporario)');
+  if (!title) return bad(c, 'Falta el título');
+
+  let ownerKind: 'agency' | 'particular' = 'particular';
+  let agencyId: number | null = null;
+  let branchId: number | null = null;
+  if (body.scope === 'agency') {
+    const mine = await getUserAgency(c.env.DB, c.var.user.id);
+    if (!mine) return bad(c, 'No pertenecés a una inmobiliaria');
+    const sub = await getSubStatus(c.env.DB, mine.agency.id);
+    if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
+    ownerKind = 'agency';
+    agencyId = mine.agency.id;
+    branchId = num(body.branch_id);
+  }
+
+  const row = await c.env.DB
+    .prepare(
+      `INSERT INTO properties
+        (owner_kind, agency_id, branch_id, owner_user_id, operation, kind, title, description,
+         price, currency, price_period, area_m2, rooms, capacity, available_from, available_until, bathrooms, amenities,
+         address, city, province, lat, lng, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'disponible') RETURNING *`,
+    )
+    .bind(
+      ownerKind, agencyId, branchId, c.var.user.id, operation,
+      str(body.kind, 40), title, str(body.description, 4000),
+      num(body.price), str(body.currency, 8) || 'USD', str(body.price_period, 10), num(body.area_m2), num(body.rooms),
+      num(body.capacity), str(body.available_from, 10), str(body.available_until, 10),
+      num(body.bathrooms), jsonAmenities(body.amenities),
+      str(body.address, 200), str(body.city, 80), str(body.province, 80),
+      num(body.lat), num(body.lng),
+    )
+    .first();
+  return c.json({ property: row }, 201);
+});
+
+// Importar una propiedad desde un link de Argenprop (extrae datos + fotos).
+const BROWSER_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'es-AR,es;q=0.9',
+};
+
+properties.post('/import', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const url = str(body.url, 500);
+  if (!url || !/^https?:\/\/(www\.)?argenprop\.com\//i.test(url)) return bad(c, 'Pegá un link de argenprop.com');
+
+  let ownerKind: 'agency' | 'particular' = 'particular';
+  let agencyId: number | null = null;
+  if (body.scope === 'agency') {
+    const mine = await getUserAgency(c.env.DB, c.var.user.id);
+    if (!mine) return bad(c, 'No pertenecés a una inmobiliaria');
+    const sub = await getSubStatus(c.env.DB, mine.agency.id);
+    if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
+    ownerKind = 'agency';
+    agencyId = mine.agency.id;
+  }
+
+  const grab = async (u: string) => {
+    try { const r = await fetch(u, { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(20000) }); return r.ok ? await r.text() : ''; }
+    catch { return ''; }
+  };
+  // Con proxy configurado (SCRAPER_URL) se saltea el anti-bot; si no, intento directo (suele bloquear).
+  let html = '';
+  if (c.env.SCRAPER_URL) html = await grab(c.env.SCRAPER_URL.replace('{url}', encodeURIComponent(url)));
+  if (!html || html.length < 2000) html = await grab(url);
+  if (!html || html.length < 2000) {
+    return c.json({ error: 'No pudimos leer el aviso de Argenprop (puede estar bloqueando el acceso). Probá de nuevo en un rato o cargala a mano.', code: 'IMPORT_FAILED' }, 502);
+  }
+
+  const { draft, images } = parseArgenprop(html, url);
+  if (!draft.title && draft.price == null) {
+    return c.json({ error: 'No pudimos extraer los datos del aviso. Cargala a mano.', code: 'IMPORT_FAILED' }, 422);
+  }
+
+  const row = await c.env.DB
+    .prepare(
+      `INSERT INTO properties
+        (owner_kind, agency_id, owner_user_id, operation, kind, title, description,
+         price, currency, area_m2, rooms, capacity, bathrooms, amenities,
+         address, city, province, status, published)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'disponible', 0) RETURNING *`,
+    )
+    .bind(
+      ownerKind, agencyId, c.var.user.id, draft.operation || 'alquiler', draft.kind, draft.title || 'Propiedad importada',
+      draft.description, draft.price, draft.currency, draft.area_m2, draft.rooms, null, draft.bathrooms,
+      draft.amenities.length ? JSON.stringify(draft.amenities) : null,
+      draft.address, draft.city, draft.province,
+    )
+    .first<{ id: number }>();
+  if (!row) return bad(c, 'No se pudo crear la propiedad');
+
+  // Bajar las fotos a R2 (best-effort, tope 15).
+  let photos = 0;
+  for (const imgUrl of images.slice(0, 15)) {
+    try {
+      const ir = await fetch(imgUrl, { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(9000) });
+      if (!ir.ok) continue;
+      const ct = ir.headers.get('content-type') || 'image/jpeg';
+      if (!ct.startsWith('image/')) continue;
+      const key = `prop/${row.id}/${crypto.randomUUID()}.jpg`;
+      await c.env.MEDIA.put(key, await ir.arrayBuffer(), { httpMetadata: { contentType: ct } });
+      await c.env.DB.prepare("INSERT INTO property_media (property_id, r2_key, kind, sort) VALUES (?, ?, 'photo', ?)").bind(row.id, key, photos).run();
+      photos++;
+    } catch { /* salta la foto que falle */ }
+  }
+
+  return c.json({ property: row, imported: { photos, fields: draft } }, 201);
+});
+
+// Carga una propiedad que el user puede gestionar (suya o de su agencia), o null.
+async function loadManageable(db: D1Database, userId: number, id: number) {
+  const mine = await getUserAgency(db, userId);
+  const agencyId = mine?.agency.id ?? -1;
+  return db
+    .prepare('SELECT * FROM properties WHERE id = ? AND (owner_user_id = ? OR agency_id = ?)')
+    .bind(id, userId, agencyId)
+    .first<Record<string, unknown>>();
+}
+
+// Editar campos (incluye publicar/despublicar y cambiar estado).
+properties.patch('/:id', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  const setStr = (col: string, v: string | null) => { sets.push(`${col} = ?`); binds.push(v); };
+  const setNum = (col: string, v: number | null) => { sets.push(`${col} = ?`); binds.push(v); };
+
+  if ('title' in body) { const t = str(body.title, 160); if (!t) return bad(c, 'title vacío'); setStr('title', t); }
+  if ('operation' in body) { const o = str(body.operation, 20); if (!o || !OPERATIONS.includes(o)) return bad(c, 'operation inválida'); setStr('operation', o); }
+  if ('kind' in body) setStr('kind', str(body.kind, 40));
+  if ('description' in body) setStr('description', str(body.description, 4000));
+  if ('price' in body) setNum('price', num(body.price));
+  if ('currency' in body) setStr('currency', str(body.currency, 8) || 'USD');
+  if ('price_period' in body) setStr('price_period', str(body.price_period, 10));
+  if ('rooms' in body) setNum('rooms', num(body.rooms));
+  if ('area_m2' in body) setNum('area_m2', num(body.area_m2));
+  if ('capacity' in body) setNum('capacity', num(body.capacity));
+  if ('available_from' in body) setStr('available_from', str(body.available_from, 10));
+  if ('available_until' in body) setStr('available_until', str(body.available_until, 10));
+  if ('bathrooms' in body) setNum('bathrooms', num(body.bathrooms));
+  if ('amenities' in body) { sets.push('amenities = ?'); binds.push(jsonAmenities(body.amenities)); }
+  if ('lat' in body) setNum('lat', num(body.lat));
+  if ('lng' in body) setNum('lng', num(body.lng));
+  if ('city' in body) setStr('city', str(body.city, 80));
+  if ('province' in body) setStr('province', str(body.province, 80));
+  if ('address' in body) setStr('address', str(body.address, 200));
+  if ('status' in body) {
+    // disponible/reservada/alquilada se calculan solos desde el calendario; acá
+    // solo se puede vender (marcar 'vendida') o revertir eso ('disponible').
+    const s = str(body.status, 20);
+    if (!s || !MANUAL_STATUSES.includes(s)) return bad(c, "status inválido (solo 'disponible' o 'vendida')");
+    setStr('status', s);
+  }
+  if ('archived' in body) {
+    if (body.archived) {
+      if (prop.status !== 'vendida') return bad(c, 'Solo se puede archivar una propiedad vendida');
+      sets.push("archived_at = datetime('now')");
+      sets.push('published = ?'); binds.push(0);
+    } else {
+      sets.push('archived_at = NULL');
+    }
+  }
+  if ('published' in body) { sets.push('published = ?'); binds.push(body.published ? 1 : 0); }
+  if ('branch_id' in body) { sets.push('branch_id = ?'); binds.push(num(body.branch_id)); }
+  if (!sets.length) return bad(c, 'Nada para actualizar');
+
+  sets.push("updated_at = datetime('now')");
+  binds.push(id);
+  await c.env.DB.prepare(`UPDATE properties SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run();
+  const updated = await c.env.DB.prepare('SELECT * FROM properties WHERE id = ?').bind(id).first();
+  return c.json({ property: updated });
+});
+
+properties.delete('/:id', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  await c.env.DB.prepare('DELETE FROM properties WHERE id = ?').bind(id).run();
+  return c.json({ success: true });
+});
+
+// ── Fotos de la propiedad (R2). Se sirven públicas en GET /media/<key>. ──
+
+const MAX_BYTES = 8 * 1024 * 1024;
+
+// El global File no viene tipado con @cloudflare/workers-types; forma mínima que usamos.
+type Uploaded = { type: string; size: number; name: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+// Subir una foto (multipart, campo "file") a una propiedad gestionable.
+properties.post('/:id/media', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+
+  const form = await c.req.formData().catch(() => null);
+  const file = form?.get('file') as unknown as Uploaded | string | null | undefined;
+  if (!file || typeof file === 'string') return bad(c, 'Falta el archivo (campo "file")');
+  if (!file.type.startsWith('image/')) return bad(c, 'Solo se aceptan imágenes');
+  if (file.size > MAX_BYTES) return bad(c, 'La imagen supera 8MB');
+
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 5) || 'jpg';
+  const key = `prop/${id}/${crypto.randomUUID()}.${ext}`;
+  await c.env.MEDIA.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: file.type } });
+
+  const next = await c.env.DB
+    .prepare('SELECT COALESCE(MAX(sort), -1) + 1 AS n FROM property_media WHERE property_id = ?')
+    .bind(id)
+    .first<{ n: number }>();
+  const row = await c.env.DB
+    .prepare("INSERT INTO property_media (property_id, r2_key, kind, sort) VALUES (?, ?, 'photo', ?) RETURNING id, r2_key, sort")
+    .bind(id, key, next?.n ?? 0)
+    .first();
+  return c.json({ media: row }, 201);
+});
+
+// Listar fotos de una propiedad gestionable.
+properties.get('/:id/media', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  const res = await c.env.DB
+    .prepare('SELECT id, r2_key, sort FROM property_media WHERE property_id = ? ORDER BY sort')
+    .bind(id)
+    .all();
+  return c.json({ media: res.results });
+});
+
+// Borrar una foto (de R2 + fila).
+properties.delete('/:id/media/:mid', async (c) => {
+  const id = num(c.req.param('id'));
+  const mid = num(c.req.param('mid'));
+  if (id == null || mid == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  const m = await c.env.DB
+    .prepare('SELECT r2_key FROM property_media WHERE id = ? AND property_id = ?')
+    .bind(mid, id)
+    .first<{ r2_key: string }>();
+  if (!m) return notFound(c, 'Foto no encontrada');
+  await c.env.MEDIA.delete(m.r2_key);
+  await c.env.DB.prepare('DELETE FROM property_media WHERE id = ?').bind(mid).run();
+  return c.json({ success: true });
+});
+
+// ── Estadísticas de visitas de una propiedad (para el dueño) ──
+properties.get('/:id/stats', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  // Serie de los últimos 30 días (los días sin visitas no tienen fila; se rellenan en el cliente).
+  const series = (await c.env.DB
+    .prepare(`SELECT day, count FROM property_views WHERE property_id = ? AND day >= date('now','-29 days') ORDER BY day`)
+    .bind(id)
+    .all<{ day: string; count: number }>()).results;
+  const agg = await c.env.DB
+    .prepare(
+      `SELECT COALESCE(SUM(count), 0) AS total,
+              COALESCE(SUM(CASE WHEN day >= date('now','-6 days')  THEN count ELSE 0 END), 0) AS last7,
+              COALESCE(SUM(CASE WHEN day >= date('now','-29 days') THEN count ELSE 0 END), 0) AS last30
+       FROM property_views WHERE property_id = ?`,
+    )
+    .bind(id)
+    .first<{ total: number; last7: number; last30: number }>();
+  return c.json({ total: agg?.total ?? 0, last7: agg?.last7 ?? 0, last30: agg?.last30 ?? 0, series });
+});
+
+// ── Reservas / bloqueos de fechas (temporario) ──
+properties.get('/:id/bookings', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  const res = await c.env.DB
+    .prepare('SELECT id, from_date, to_date, guest_name, notes, kind FROM bookings WHERE property_id = ? ORDER BY from_date')
+    .bind(id)
+    .all();
+  return c.json({ bookings: res.results });
+});
+
+properties.post('/:id/bookings', async (c) => {
+  const id = num(c.req.param('id'));
+  if (id == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  if (prop.status === 'vendida') return bad(c, 'Esta propiedad está vendida, no acepta nuevas reservas');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const from = str(body.from_date, 10);
+  const to = str(body.to_date, 10);
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!from || !to || !re.test(from) || !re.test(to)) return bad(c, 'Fechas inválidas (YYYY-MM-DD)');
+  if (from > to) return bad(c, 'La fecha de inicio es posterior a la de fin');
+  const kind = str(body.kind, 20) || 'reserva';
+  if (!BOOKING_KINDS.includes(kind)) return bad(c, 'kind inválido (reserva|alquiler)');
+  const clash = await c.env.DB
+    .prepare('SELECT id FROM bookings WHERE property_id = ? AND from_date <= ? AND to_date >= ? LIMIT 1')
+    .bind(id, to, from)
+    .first();
+  if (clash) return bad(c, 'Esas fechas se superponen con una reserva existente');
+  const row = await c.env.DB
+    .prepare('INSERT INTO bookings (property_id, from_date, to_date, guest_name, notes, kind) VALUES (?, ?, ?, ?, ?, ?) RETURNING *')
+    .bind(id, from, to, str(body.guest_name, 120), str(body.notes, 500), kind)
+    .first();
+  return c.json({ booking: row }, 201);
+});
+
+// Confirmar una reserva como alquiler efectivo (o revertir) sin recrear el rango.
+properties.patch('/:id/bookings/:bid', async (c) => {
+  const id = num(c.req.param('id'));
+  const bid = num(c.req.param('bid'));
+  if (id == null || bid == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const kind = str(body.kind, 20);
+  if (!kind || !BOOKING_KINDS.includes(kind)) return bad(c, 'kind inválido (reserva|alquiler)');
+  const row = await c.env.DB
+    .prepare('UPDATE bookings SET kind = ? WHERE id = ? AND property_id = ? RETURNING *')
+    .bind(kind, bid, id)
+    .first();
+  if (!row) return notFound(c, 'Reserva no encontrada');
+  return c.json({ booking: row });
+});
+
+properties.delete('/:id/bookings/:bid', async (c) => {
+  const id = num(c.req.param('id'));
+  const bid = num(c.req.param('bid'));
+  if (id == null || bid == null) return bad(c, 'id inválido');
+  const prop = await loadManageable(c.env.DB, c.var.user.id, id);
+  if (!prop) return notFound(c, 'Propiedad no encontrada');
+  await c.env.DB.prepare('DELETE FROM bookings WHERE id = ? AND property_id = ?').bind(bid, id).run();
+  return c.json({ success: true });
+});

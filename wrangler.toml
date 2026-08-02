@@ -1,0 +1,49 @@
+# CoopenPlaces — Worker unificado: API Hono + SSR público del marketplace +
+# SPA de gestión servida por assets.
+#
+# Secrets (wrangler secret put, NUNCA acá):
+#   GOOGLE_CLIENT_SECRET — OAuth de Google (login). Ver GOOGLE_CLIENT_ID en [vars] abajo.
+#   INTERNAL_API_SECRET  — futuro, opcional: alertas de búsquedas guardadas por email.
+name = "coopen-places"
+main = "src/worker/index.ts"
+account_id = "d9eac09aa903fdf10ee5a521bd0186dc"
+# Máximo soportado por el workerd de wrangler ~4.85 (pineado por Node 20).
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# Sin dominio propio todavía: el Worker sirve en https://coopen-places.<tu-subdominio>.workers.dev
+# Cuando tengas un dominio, se agrega acá un bloque `routes = [{ pattern = "tu-dominio.com", custom_domain = true }]`.
+
+# A diferencia de Finance (SPA pura), acá el Worker corre PRIMERO en TODA request:
+# renderiza SSR el marketplace público (indexable) y delega a ASSETS los estáticos
+# y la SPA de gestión (/app/*). El fallback SPA sirve index.html para rutas client-side.
+[assets]
+directory = "dist/client"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "coopen-places-db"
+database_id = "12c87ac7-fc47-4db4-abbc-c6617b12eedf"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "coopen-places-media"
+
+[vars]
+# OAuth Client ID de Google (Google Cloud Console → APIs & Services → Credentials →
+# OAuth client ID, tipo "Web application"). No es secreto, pero el Client Secret sí
+# (setealo con `wrangler secret put GOOGLE_CLIENT_SECRET`).
+# Redirect URI a autorizar en Google: https://<tu-dominio>/api/auth/callback/google
+GOOGLE_CLIENT_ID = "932608486382-eirj5s8emld2vfr64pruprtg1po1rprn.apps.googleusercontent.com"
+# Super-admins del panel interno: emails (o auth_sub) separados por coma.
+SUPER_ADMIN_SUBS = "tomasmoodleiram@gmail.com"
+# Base pública del sitio (para links en emails del cron; no hay request ahí para derivarla).
+SITE_URL = "https://coopen-places.tomyredrebell.workers.dev"
+
+# Cron: alertas de búsquedas guardadas por email (1 vez al día, ~10am ART = 13 UTC).
+# El handler está DORMANTE hasta que se conecte un proveedor de mail (ver lib/alerts.ts).
+[triggers]
+crons = ["0 13 * * *"]
