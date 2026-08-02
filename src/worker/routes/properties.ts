@@ -5,7 +5,7 @@ import { getSubStatus, getUserAgency } from '../lib/subscription';
 import { parseArgenprop } from '../lib/argenprop';
 import { BOOKING_KINDS, COMPUTED_STATUS_SQL } from '../lib/propertyStatus';
 
-// Cartera de propiedades (módulo A para agencias, B para propietarios particulares).
+// Cartera de propiedades de la inmobiliaria (no hay alta particular, ver POST /).
 export const properties = new Hono<AppEnv>();
 
 const OPERATIONS = ['venta', 'alquiler', 'temporario'];
@@ -18,7 +18,8 @@ function jsonAmenities(v: unknown): string | null {
   return Array.isArray(v) ? JSON.stringify(v.filter((x) => typeof x === 'string').slice(0, 20)) : null;
 }
 
-// Propiedades que el user puede gestionar: las suyas (particular) + las de su agencia.
+// Propiedades que el user puede gestionar (las de su agencia; owner_user_id queda
+// como filtro defensivo por si hay filas históricas de antes de este cambio).
 properties.get('/mine', async (c) => {
   const mine = await getUserAgency(c.env.DB, c.var.user.id);
   const agencyId = mine?.agency.id ?? -1;
@@ -41,8 +42,9 @@ properties.get('/mine', async (c) => {
   return c.json({ properties: res.results });
 });
 
-// Crear propiedad. scope='agency' la mete en la cartera de la inmobiliaria (gateada
-// por la suscripción); si no, es del propietario particular.
+// Crear propiedad. Solo inmobiliarias (cartera gateada por la suscripción) —
+// no hay alta de propiedad "particular" (decisión de producto: el software se
+// vende a inmobiliarias, no es autoservicio para dueños sueltos).
 properties.post('/', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const operation = str(body.operation, 20);
@@ -50,18 +52,13 @@ properties.post('/', async (c) => {
   if (!operation || !OPERATIONS.includes(operation)) return bad(c, 'operation inválida (venta|alquiler|temporario)');
   if (!title) return bad(c, 'Falta el título');
 
-  let ownerKind: 'agency' | 'particular' = 'particular';
-  let agencyId: number | null = null;
-  let branchId: number | null = null;
-  if (body.scope === 'agency') {
-    const mine = await getUserAgency(c.env.DB, c.var.user.id);
-    if (!mine) return bad(c, 'No pertenecés a una inmobiliaria');
-    const sub = await getSubStatus(c.env.DB, mine.agency.id);
-    if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
-    ownerKind = 'agency';
-    agencyId = mine.agency.id;
-    branchId = num(body.branch_id);
-  }
+  const mine = await getUserAgency(c.env.DB, c.var.user.id);
+  if (!mine) return bad(c, 'Necesitás pertenecer a una inmobiliaria para publicar propiedades');
+  const sub = await getSubStatus(c.env.DB, mine.agency.id);
+  if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
+  const ownerKind = 'agency';
+  const agencyId = mine.agency.id;
+  const branchId = num(body.branch_id);
 
   const row = await c.env.DB
     .prepare(
@@ -96,16 +93,12 @@ properties.post('/import', async (c) => {
   const url = str(body.url, 500);
   if (!url || !/^https?:\/\/(www\.)?argenprop\.com\//i.test(url)) return bad(c, 'Pegá un link de argenprop.com');
 
-  let ownerKind: 'agency' | 'particular' = 'particular';
-  let agencyId: number | null = null;
-  if (body.scope === 'agency') {
-    const mine = await getUserAgency(c.env.DB, c.var.user.id);
-    if (!mine) return bad(c, 'No pertenecés a una inmobiliaria');
-    const sub = await getSubStatus(c.env.DB, mine.agency.id);
-    if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
-    ownerKind = 'agency';
-    agencyId = mine.agency.id;
-  }
+  const mine = await getUserAgency(c.env.DB, c.var.user.id);
+  if (!mine) return bad(c, 'Necesitás pertenecer a una inmobiliaria para publicar propiedades');
+  const sub = await getSubStatus(c.env.DB, mine.agency.id);
+  if (sub?.blocked) return paymentRequired(c, 'Trial vencido: contactá a Coopen para reactivar la gestión');
+  const ownerKind = 'agency';
+  const agencyId = mine.agency.id;
 
   const grab = async (u: string) => {
     try { const r = await fetch(u, { headers: BROWSER_HEADERS, signal: AbortSignal.timeout(20000) }); return r.ok ? await r.text() : ''; }

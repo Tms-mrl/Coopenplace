@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { AppEnv } from '../lib/types';
 import { bad, forbidden, num, str } from '../lib/http';
-import { createAgencyWithTrial, getSubStatus, getUserAgency, TRIAL_DAYS } from '../lib/subscription';
+import { getSubStatus, getUserAgency } from '../lib/subscription';
 import { genToken } from '../lib/auth';
 import { COMPUTED_STATUS_SQL } from '../lib/propertyStatus';
 
@@ -91,21 +91,9 @@ agencies.get('/inquiries', async (c) => {
   return c.json({ inquiries: res.results });
 });
 
-// Crear la inmobiliaria → arranca trial de 30 días (decisión de producto).
-agencies.post('/', async (c) => {
-  const existing = await getUserAgency(c.env.DB, c.var.user.id);
-  if (existing) return bad(c, 'Ya pertenecés a una inmobiliaria');
-  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const name = str(body.name, 120);
-  if (!name) return bad(c, 'Falta el nombre de la inmobiliaria');
-  const agency = await createAgencyWithTrial(c.env.DB, c.var.user.id, {
-    name,
-    legal_name: str(body.legal_name, 160),
-    tax_id: str(body.tax_id, 40),
-  });
-  const sub = await getSubStatus(c.env.DB, agency.id);
-  return c.json({ agency, subscription: sub, trialDays: TRIAL_DAYS }, 201);
-});
+// No hay autoservicio: las inmobiliarias las da de alta el super-admin desde el
+// Admin de Coopen (POST /api/admin/agencies), que genera el link de acceso del
+// cliente. Ver routes/admin.ts.
 
 // Alta de sucursal (solo admin/manager de la agencia).
 agencies.post('/branches', async (c) => {
