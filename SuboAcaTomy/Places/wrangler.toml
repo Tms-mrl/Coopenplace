@@ -1,0 +1,110 @@
+# CoopenPlaces — Worker unificado: API Hono + SSR público del marketplace +
+# SPA de gestión servida por assets. Cuenta CF unificada (ver d:/Coopen/CLAUDE.md §2).
+#
+# Este es el deploy PROPIO de Coopen. Cada cliente white-label (ej. El Muelle) tiene
+# su propio Worker/D1/R2/dominio con SU wrangler.toml — mismo código, otra config.
+# Ver Coopen/3-Apps/Clientes/ElMuelle/.
+#
+# Secrets (wrangler secret put, NUNCA acá):
+#   (ninguno obligatorio — el SSO modelo C no necesita JWT_SECRET)
+#   GOOGLE_CLIENT_SECRET — solo si se habilita el login propio con Google (ver [vars]).
+#   INTERNAL_API_SECRET  — futuro: emails (alertas de búsquedas guardadas) vía Gmail+vault.
+#   SCRAPER_URL          — proxy de scraping para el import de Argenprop.
+name = "coopen-places"
+main = "src/worker/index.ts"
+account_id = "08f732190097f5aac0d496cdc63888a5"
+# Máximo soportado por el workerd de wrangler ~4.85 (pineado por Node 20, ver CLAUDE.md root).
+compatibility_date = "2026-05-01"
+workers_dev = true
+
+# Custom domain: wrangler lo provisiona (DNS + cert) al deployar; la zona
+# coopenstudio.com vive en esta misma cuenta. Necesario para la cookie SSO.
+routes = [
+  { pattern = "places.coopenstudio.com", custom_domain = true },
+]
+
+# A diferencia de Finance (SPA pura), acá el Worker corre PRIMERO en TODA request:
+# renderiza SSR el marketplace público (indexable) y delega a ASSETS los estáticos
+# y la SPA de gestión (/app/*). El fallback SPA sirve index.html para rutas client-side.
+[assets]
+directory = "dist/client"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "coopen-places-db"
+database_id = "cacef74b-d9a6-423b-8b5a-506e8a56240d"
+
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "coopen-places-media"
+
+[vars]
+# SSO del ecosistema (modelo C / delegación). Setearla es lo que hace que este deploy
+# acepte la cookie `coopen_session`. Un deploy white-label de cliente NO la setea:
+# queda con login propio + link de acceso, aislado de la cuenta única de Coopen.
+AUTH_URL = "https://auth.coopenstudio.com"
+# Super-admins del Admin de Coopen: subs o emails de CoopenAuth, separados por coma.
+SUPER_ADMIN_SUBS = "3,coopenstudio@gmail.com"
+# Base pública (links absolutos del cron de alertas, que no tiene request de donde sacarla).
+SITE_URL = "https://places.coopenstudio.com"
+# Login propio con Google (opcional, además del SSO). Si se habilita, el Client ID va acá
+# y DEBE ser el unificado del ecosistema (1091746341665-…, ver CLAUDE.md §2 — nunca crear
+# uno nuevo), con `https://places.coopenstudio.com/api/auth/callback/google` autorizado
+# como redirect URI en Google Cloud Console. Sin esto, el login entra por CoopenAuth.
+# GOOGLE_CLIENT_ID = "1091746341665-eup20o76n4r27nhj2ks0ipvb1hdf127j.apps.googleusercontent.com"
+
+# Cron: alertas de búsquedas guardadas por email (1 vez al día, ~10am ART = 13 UTC).
+# El handler es DORMANTE hasta setear el secret INTERNAL_API_SECRET (no manda nada sin él).
+[triggers]
+crons = ["0 13 * * *"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOYS WHITE-LABEL (1 cliente = 1 env = su propio Worker + D1 + R2 + dominio)
+#
+# MISMO CÓDIGO que el deploy de Coopen: la marca del cliente NO se hornea acá, vive
+# en `site_settings.brand_name` de SU D1 (migración 0013) y el admin de la agencia la
+# edita en vivo. Por eso un cliente nuevo = un bloque [env.<cliente>] + provisionar
+# sus recursos; cero cambios de código, cero fork.
+#
+#   pnpm build && npx wrangler deploy --env elmuelle
+#
+# ⚠️ `[env.X]` NO hereda vars/d1/r2/routes del top-level: hay que declararlos completos.
+# ⚠️ Cada cliente consume un slot de D1 (la cuenta está en el tope del plan, ver §2 root).
+# Doc del cliente: Coopen/3-Apps/Clientes/ElMuelle/CLAUDE.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+[env.elmuelle]
+name = "coopen-places-elmuelle"
+routes = [
+  { pattern = "elmuelle.coopenstudio.com", custom_domain = true },
+]
+
+[env.elmuelle.assets]
+directory = "dist/client"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[env.elmuelle.d1_databases]]
+binding = "DB"
+database_name = "elmuelle-db"
+database_id = "6f508313-7657-4bfa-91fc-1d15d943b17c"
+
+[[env.elmuelle.r2_buckets]]
+binding = "MEDIA"
+bucket_name = "elmuelle-media"
+
+[env.elmuelle.vars]
+# Vive bajo *.coopenstudio.com, así que la cookie SSO le llega: participa de la cuenta
+# única del ecosistema igual que el resto (modelo C).
+AUTH_URL = "https://auth.coopenstudio.com"
+# Charly sigue siendo super-admin (gestiona el trial/suscripción del cliente desde el
+# Admin de Coopen). El cliente NO es super-admin: administra SU agencia, no la plataforma.
+SUPER_ADMIN_SUBS = "3,coopenstudio@gmail.com"
+SITE_URL = "https://elmuelle.coopenstudio.com"
+
+[env.elmuelle.triggers]
+crons = ["0 13 * * *"]

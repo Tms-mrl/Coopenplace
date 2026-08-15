@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+*.log
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
