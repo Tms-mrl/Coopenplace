@@ -1,14 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   BarChart3, Calendar as CalendarIcon, Camera, Check, ChevronDown, ChevronLeft,
   ChevronRight, ChevronUp, Download, Link as LinkIcon, Pencil, Send, Trash2, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { cn } from '../lib/cn';
-import { BOOKING_KINDS, mediaUrl, money, STATUSES, type Booking, type Branch, type Media, type Property } from '../lib/types';
+import { mediaUrl, money, STATUSES, type Branch, type Media, type Property } from '../lib/types';
 import { AMENITIES, parseAmenities } from '../lib/amenities';
 import { toast } from '../lib/toast';
+import { prefetchClients } from '../lib/clients-cache';
 import { AskModal, Modal, PhotoManager, PropertyForm } from './property-form';
+import { CalendarModal } from './calendar-modal';
 import { StatsModal } from './stats-modal';
 import { ShareButton } from './share-button';
 import { useIsMobile } from '../lib/use-mobile';
@@ -26,8 +28,6 @@ const STATUS_COLOR: Record<string, string> = {
   alquilada: 'text-muted-foreground',
   vendida: 'text-muted-foreground',
 };
-
-const KIND_LABEL: Record<string, string> = { reserva: 'Reservada', alquiler: 'Alquilada' };
 
 // Etiqueta de solo lectura: disponible/reservada/alquilada se calculan desde el
 // calendario, ya no se eligen a mano (ver SaleActions para el único estado manual).
@@ -68,32 +68,30 @@ function bookedInRange(bookingsJson: string | null, from: string, to: string): b
   catch { return false; }
 }
 
-// Calendario de reservas: cada rango cargado se etiqueta Reservada o Alquilada, y ese
-// es el dato que gobierna el estado calculado de la propiedad (ver StatusChip).
-export function CalendarModal({ property, onClose }: { property: Property; onClose: () => void }) {
-  const [bookings, setBookings] = useState<Booking[]>([]);
+// Como bookedInRange, pero además dice CON QUÉ tipo se solapa (para el chip de Estado).
+function bookingKindInRange(bookingsJson: string | null, from: string, to: string): string | null {
+  try {
+    const hit = (JSON.parse(bookingsJson || '[]') as { f: string; t: string; k?: string }[]).find((b) => b.f <= to && from <= b.t);
+    return hit ? (hit.k || 'reserva') : null;
+  } catch { return null; }
+}
+
+const fmtShort = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+
+// Selector de rango de fechas por almanaque clickeable (mismo look que CalendarModal),
+// para reemplazar el par de <input type=date> del filtro de Inventario.
+function DateRangePicker({ from, to, onChange }: { from: string; to: string; onChange: (from: string, to: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
   const now = new Date();
   const [ym, setYm] = useState({ y: now.getFullYear(), m: now.getMonth() });
-  const [f, setF] = useState({ from: '', to: '', guest: '', kind: 'reserva' });
-  const sold = property.status === 'vendida';
-  const load = () => api<{ bookings: Booking[] }>(`/api/properties/${property.id}/bookings`).then((r) => setBookings(r.bookings)).catch(() => {});
-  useEffect(() => { load(); }, []);
 
-  const bookingOn = (d: string) => bookings.find((b) => b.from_date <= d && d <= b.to_date);
-  async function add() {
-    if (!f.from || !f.to) return toast('Elegí las fechas desde y hasta', 'err');
-    try {
-      await api(`/api/properties/${property.id}/bookings`, { method: 'POST', body: JSON.stringify({ from_date: f.from, to_date: f.to, guest_name: f.guest, kind: f.kind }) });
-      setF({ from: '', to: '', guest: '', kind: 'reserva' }); load();
-    } catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  async function del(id: number) {
-    try { await api(`/api/properties/${property.id}/bookings/${id}`, { method: 'DELETE' }); load(); } catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  async function confirmAlquilada(id: number) {
-    try { await api(`/api/properties/${property.id}/bookings/${id}`, { method: 'PATCH', body: JSON.stringify({ kind: 'alquiler' }) }); load(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
 
   const first = new Date(ym.y, ym.m, 1).getDay();
   const days = new Date(ym.y, ym.m + 1, 0).getDate();
@@ -101,53 +99,47 @@ export function CalendarModal({ property, onClose }: { property: Property; onClo
   const monthName = new Date(ym.y, ym.m, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
   const shift = (d: number) => setYm(({ y, m }) => { const nd = new Date(y, m + d, 1); return { y: nd.getFullYear(), m: nd.getMonth() }; });
 
+  // 1er click: fija "desde". 2do click: si es posterior, fija "hasta"; si es anterior, reinicia "desde".
+  function pick(d: string) {
+    if (!from || to) { onChange(d, ''); return; }
+    if (d < from) { onChange(d, ''); return; }
+    onChange(from, d);
+  }
+
+  const label = from && to ? `${fmtShort(from)} → ${fmtShort(to)}` : from ? `${fmtShort(from)} → …` : 'Fechas';
+
   return (
-    <Modal title={`Reservas · ${property.title}`} onClose={onClose}>
-      <div className="cal-head">
-        <Button variant="ghost" size="icon" onClick={() => shift(-1)}><ChevronLeft className="h-4 w-4" /></Button>
-        <b style={{ textTransform: 'capitalize' }}>{monthName}</b>
-        <Button variant="ghost" size="icon" onClick={() => shift(1)}><ChevronRight className="h-4 w-4" /></Button>
-      </div>
-      <div className="cal-grid">
-        {['D', 'L', 'M', 'M', 'J', 'V', 'S'].map((d, i) => <div key={i} className="cal-dow">{d}</div>)}
-        {cells.map((d, i) => {
-          if (!d) return <div key={i} />;
-          const b = bookingOn(d);
-          const cls = b ? (b.kind === 'alquiler' ? 'cal-day booked' : 'cal-day booked-reserva') : 'cal-day';
-          return <div key={i} className={cls}>{Number(d.slice(-2))}</div>;
-        })}
-      </div>
-      {sold ? (
-        <p className="muted small" style={{ marginTop: 14 }}>Esta propiedad está vendida — no acepta nuevas reservas ni alquileres.</p>
-      ) : (
-        <div className="form" style={{ marginTop: 14 }}>
-          <div className="row2">
-            <label className="date-lbl">Desde<input type="date" value={f.from} onChange={(e) => setF((s) => ({ ...s, from: e.target.value }))} /></label>
-            <label className="date-lbl">Hasta<input type="date" value={f.to} onChange={(e) => setF((s) => ({ ...s, to: e.target.value }))} /></label>
+    <div className="date-range-field" ref={ref}>
+      <Button type="button" variant="outline" size="sm" onClick={() => setOpen((o) => !o)}>
+        <CalendarIcon className="h-4 w-4" />{label}
+      </Button>
+      {open && (
+        <div className="date-range-pop">
+          <div className="cal-head">
+            <Button variant="ghost" size="icon" onClick={() => shift(-1)}><ChevronLeft className="h-4 w-4" /></Button>
+            <b style={{ textTransform: 'capitalize' }}>{monthName}</b>
+            <Button variant="ghost" size="icon" onClick={() => shift(1)}><ChevronRight className="h-4 w-4" /></Button>
           </div>
-          <Select value={f.kind} onValueChange={(v) => setF((s) => ({ ...s, kind: v }))}>
-            <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
-            <SelectContent>{BOOKING_KINDS.map((k) => <SelectItem key={k} value={k}>{KIND_LABEL[k]}</SelectItem>)}</SelectContent>
-          </Select>
-          <input placeholder="Huésped / referencia (opcional)" value={f.guest} onChange={(e) => setF((s) => ({ ...s, guest: e.target.value }))} />
-          <button className="btn" onClick={add}>Bloquear estas fechas</button>
+          <div className="cal-grid">
+            {['D', 'L', 'M', 'M', 'J', 'V', 'S'].map((d, i) => <div key={i} className="cal-dow">{d}</div>)}
+            {cells.map((d, i) => {
+              if (!d) return <div key={i} />;
+              const inRange = !!from && !!to && d >= from && d <= to;
+              const isEdge = d === from || d === to;
+              return (
+                <button key={i} type="button" className={cn('cal-day', 'cal-day-pick', inRange && 'in-range', isEdge && 'edge')} onClick={() => pick(d)}>
+                  {Number(d.slice(-2))}
+                </button>
+              );
+            })}
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', marginTop: 10 }}>
+            <button type="button" className="link-btn" onClick={() => onChange('', '')}>Limpiar</button>
+            <Button size="sm" onClick={() => setOpen(false)}>Listo</Button>
+          </div>
         </div>
       )}
-      <h4 style={{ margin: '14px 0 6px' }}>Reservas cargadas</h4>
-      {bookings.length === 0 ? <p className="muted small">Sin reservas. Las fechas que bloquees se marcan en el calendario.</p> : (
-        <div className="bk-list">
-          {bookings.map((b) => (
-            <div className="bk-row" key={b.id}>
-              <span>📅 {b.from_date} → {b.to_date} · <span className={b.kind === 'alquiler' ? 'text-muted-foreground' : 'text-warn'}>{KIND_LABEL[b.kind] || b.kind}</span>{b.guest_name ? ` · ${b.guest_name}` : ''}</span>
-              <span className="row" style={{ gap: 8 }}>
-                {b.kind === 'reserva' && <button className="link-btn" onClick={() => confirmAlquilada(b.id)}>Confirmar como alquilada</button>}
-                <button className="link-btn danger" onClick={() => del(b.id)}>Quitar</button>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </Modal>
+    </div>
   );
 }
 
@@ -469,7 +461,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
   const isMobile = useIsMobile();
 
   const load = () => api<{ properties: Property[] }>('/api/properties/mine').then((r) => setProps(r.properties)).catch(() => {});
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); prefetchClients(); }, []);
   useEffect(() => {
     if (!preset) return;
     setF({ ...EMPTY_F, status: preset.status || '', branch: preset.branch != null ? String(preset.branch) : '', op: preset.op || '', published: preset.published || '' });
@@ -513,11 +505,11 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
     }
     if (f.capacity && !(p.capacity != null && p.capacity >= Number(f.capacity))) return false;
     if (f.dateFrom || f.dateTo) {
-      // Rango pedido: la propiedad debe estar disponible TODO el tramo [from, to] y sin reservas que se solapen.
+      // Rango pedido: solo se excluye si hay una reserva que se solape. "Disponible
+      // desde/hasta" es la temporada habitual del anuncio, no un bloqueo de fechas —
+      // si no hay una reserva puntual en el medio, la propiedad SÍ está libre para el rango.
       const from = f.dateFrom || f.dateTo;
       const to = f.dateTo || f.dateFrom;
-      if (p.available_from && p.available_from > from) return false;
-      if (p.available_until && p.available_until < to) return false;
       if (bookedInRange(p.bookings, from, to)) return false;
     }
     return true;
@@ -532,6 +524,21 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
   }) : filtered;
   const allSel = sorted.length > 0 && sorted.every((p) => selected.has(p.id));
   const toggleAll = () => setSelected(allSel ? new Set() : new Set(sorted.map((p) => p.id)));
+
+  // Con Desde/Hasta activo, el chip de Estado tiene que decir si está libre PARA ESE
+  // RANGO, no el estado global de hoy — si no, una propiedad libre en las fechas buscadas
+  // pero con una reserva futura en otro mes se muestra igual como "Reservada" y confunde.
+  const dateActive = !!(f.dateFrom || f.dateTo);
+  const displayRows = dateActive
+    ? sorted.map((p) => {
+        if (p.status === 'vendida') return p;
+        const from = f.dateFrom || f.dateTo;
+        const to = f.dateTo || f.dateFrom;
+        const kind = bookingKindInRange(p.bookings, from, to);
+        const status = kind === 'alquiler' ? 'alquilada' : kind ? 'reservada' : 'disponible';
+        return status === p.status ? p : { ...p, status };
+      })
+    : sorted;
 
   return (
     <div>
@@ -577,8 +584,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
         </Select>
         <input type="number" placeholder="Precio máx" value={f.priceMax} onChange={(e) => set('priceMax', e.target.value)} style={{ maxWidth: 120 }} />
         <input type="number" placeholder="Personas" value={f.capacity} onChange={(e) => set('capacity', e.target.value)} style={{ maxWidth: 120 }} />
-        <label className="date-f">Desde<input type="date" value={f.dateFrom} onChange={(e) => set('dateFrom', e.target.value)} /></label>
-        <label className="date-f">Hasta<input type="date" value={f.dateTo} onChange={(e) => set('dateTo', e.target.value)} /></label>
+        <DateRangePicker from={f.dateFrom} to={f.dateTo} onChange={(dateFrom, dateTo) => setF((s) => ({ ...s, dateFrom, dateTo }))} />
         <Button variant={f.archived ? 'secondary' : 'outline'} size="sm" onClick={() => setF((s) => ({ ...s, archived: !s.archived }))}>
           {f.archived ? 'Viendo archivadas' : 'Ver archivadas'}
         </Button>
@@ -625,7 +631,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
             </Select>
           </div>
           <div className="mcard-list">
-            {sorted.map((p) => (
+            {displayRows.map((p) => (
               <PropertyMobileCard key={p.id} p={p} branches={branches} checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
                 onManage={() => setManaging(p)} onEdit={() => setEditing(p)} onCalendar={() => setCal(p)} onLightbox={openLightbox} onStats={() => setStats(p)} onReload={reload} />
             ))}
@@ -646,7 +652,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
               <th>Pub.</th><th></th>
             </tr></thead>
             <tbody>
-              {sorted.map((p) => (
+              {displayRows.map((p) => (
                 <PropertyRow key={p.id} p={p} branches={branches} expanded={expanded === p.id}
                   checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
                   onToggle={() => setExpanded((e) => (e === p.id ? null : p.id))}

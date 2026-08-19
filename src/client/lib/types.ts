@@ -66,7 +66,10 @@ export type PropertyStats = {
 
 export const BOOKING_KINDS = ['reserva', 'alquiler'] as const;
 
-export type Booking = { id: number; from_date: string; to_date: string; guest_name: string | null; notes: string | null; kind: string };
+export type Booking = {
+  id: number; from_date: string; to_date: string; guest_name: string | null; notes: string | null; kind: string;
+  client_id: number | null; client_name: string | null; client_phone: string | null;
+};
 
 export type Member = {
   member_id: number; role: string; branch_id: number | null; branch_name: string | null;
@@ -153,6 +156,21 @@ export type Match = {
 };
 
 export const STATUSES = ['disponible', 'reservada', 'alquilada', 'vendida'] as const;
+
+// Tipos de propiedad predefinidos (dropdown del alta/edición). `kind` en la base sigue
+// siendo texto libre (sin CHECK ni enum) — así una propiedad importada de Argenprop o
+// cargada antes de este dropdown, con un valor que no está en esta lista, se sigue
+// mostrando bien (ver el fallback en property-form.tsx) en vez de perderse.
+export const PROPERTY_KINDS: { v: string; label: string }[] = [
+  { v: 'casa', label: 'Casas/Chalet' },
+  { v: 'duplex', label: 'Duplex/Triplex' },
+  { v: 'departamento', label: 'Departamento' },
+  { v: 'ph', label: 'PH' },
+  { v: 'lote', label: 'Lotes' },
+  { v: 'local', label: 'Locales' },
+  { v: 'cabana', label: 'Cabañas' },
+  { v: 'apart', label: 'Apart' },
+];
 
 export const PRICE_PERIODS: { v: string; label: string; suffix: string }[] = [
   { v: '', label: 'Sin especificar', suffix: '' },

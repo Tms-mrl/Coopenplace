@@ -4,6 +4,7 @@ import { bad, notFound, num, paymentRequired, str } from '../lib/http';
 import { getSubStatus, getUserAgency } from '../lib/subscription';
 import { parseArgenprop } from '../lib/argenprop';
 import { BOOKING_KINDS, COMPUTED_STATUS_SQL } from '../lib/propertyStatus';
+import { clientInAgency } from '../lib/ownership';
 
 // Cartera de propiedades de la inmobiliaria (no hay alta particular, ver POST /).
 export const properties = new Hono<AppEnv>();
@@ -32,7 +33,14 @@ properties.get('/mine', async (c) => {
               (SELECT r2_key FROM property_media pm WHERE pm.property_id = p.id ORDER BY pm.sort LIMIT 1) AS cover_key,
               (SELECT COUNT(*) FROM property_media pm2 WHERE pm2.property_id = p.id) AS photos,
               (SELECT COALESCE(SUM(count), 0) FROM property_views v WHERE v.property_id = p.id) AS views,
-              COALESCE((SELECT json_group_array(json_object('f', bk.from_date, 't', bk.to_date, 'k', bk.kind)) FROM bookings bk WHERE bk.property_id = p.id), '[]') AS bookings
+              -- Reservas completas (no solo el rango): con esto el modal del calendario
+              -- abre YA, sin esperar su propio fetch. El nombre del contacto se resuelve
+              -- scopeado a la agencia de la propiedad (nunca por client_id a secas).
+              COALESCE((SELECT json_group_array(json_object(
+                  'id', bk.id, 'f', bk.from_date, 't', bk.to_date, 'k', bk.kind,
+                  'g', bk.guest_name, 'ci', bk.client_id,
+                  'c', (SELECT cl.name FROM clients cl WHERE cl.id = bk.client_id AND cl.agency_id = p.agency_id)))
+                FROM bookings bk WHERE bk.property_id = p.id), '[]') AS bookings
        FROM properties p LEFT JOIN branches b ON b.id = p.branch_id
        WHERE p.owner_user_id = ? OR p.agency_id = ?
        ORDER BY p.created_at DESC LIMIT 200`,
@@ -324,9 +332,17 @@ properties.get('/:id/bookings', async (c) => {
   if (id == null) return bad(c, 'id inválido');
   const prop = await loadManageable(c.env.DB, c.var.user.id, id);
   if (!prop) return notFound(c, 'Propiedad no encontrada');
+  // El JOIN de display va scopeado a la agencia de la propiedad: un client_id de otra
+  // agencia no debe poder leerse por acá (ver lib/ownership.ts).
   const res = await c.env.DB
-    .prepare('SELECT id, from_date, to_date, guest_name, notes, kind FROM bookings WHERE property_id = ? ORDER BY from_date')
-    .bind(id)
+    .prepare(
+      `SELECT b.id, b.from_date, b.to_date, b.guest_name, b.notes, b.kind, b.client_id,
+              cl.name AS client_name, cl.phone AS client_phone
+       FROM bookings b
+       LEFT JOIN clients cl ON cl.id = b.client_id AND cl.agency_id = ?
+       WHERE b.property_id = ? ORDER BY b.from_date`,
+    )
+    .bind(prop.agency_id ?? -1, id)
     .all();
   return c.json({ bookings: res.results });
 });
@@ -345,19 +361,23 @@ properties.post('/:id/bookings', async (c) => {
   if (from > to) return bad(c, 'La fecha de inicio es posterior a la de fin');
   const kind = str(body.kind, 20) || 'reserva';
   if (!BOOKING_KINDS.includes(kind)) return bad(c, 'kind inválido (reserva|alquiler)');
+  const agencyId = (prop.agency_id as number | null) ?? null;
+  const clientId = num(body.client_id);
+  if (!(await clientInAgency(c.env.DB, agencyId, clientId))) return bad(c, 'Contacto inválido');
   const clash = await c.env.DB
     .prepare('SELECT id FROM bookings WHERE property_id = ? AND from_date <= ? AND to_date >= ? LIMIT 1')
     .bind(id, to, from)
     .first();
   if (clash) return bad(c, 'Esas fechas se superponen con una reserva existente');
   const row = await c.env.DB
-    .prepare('INSERT INTO bookings (property_id, from_date, to_date, guest_name, notes, kind) VALUES (?, ?, ?, ?, ?, ?) RETURNING *')
-    .bind(id, from, to, str(body.guest_name, 120), str(body.notes, 500), kind)
+    .prepare('INSERT INTO bookings (property_id, from_date, to_date, guest_name, notes, kind, client_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *')
+    .bind(id, from, to, str(body.guest_name, 120), str(body.notes, 500), kind, clientId)
     .first();
   return c.json({ booking: row }, 201);
 });
 
-// Confirmar una reserva como alquiler efectivo (o revertir) sin recrear el rango.
+// Confirmar una reserva como alquiler efectivo (o revertir) sin recrear el rango, y/o
+// asignarle el contacto del CRM (al confirmar el alquiler se pide quién alquila).
 properties.patch('/:id/bookings/:bid', async (c) => {
   const id = num(c.req.param('id'));
   const bid = num(c.req.param('bid'));
@@ -365,11 +385,22 @@ properties.patch('/:id/bookings/:bid', async (c) => {
   const prop = await loadManageable(c.env.DB, c.var.user.id, id);
   if (!prop) return notFound(c, 'Propiedad no encontrada');
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-  const kind = str(body.kind, 20);
-  if (!kind || !BOOKING_KINDS.includes(kind)) return bad(c, 'kind inválido (reserva|alquiler)');
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  if ('kind' in body) {
+    const kind = str(body.kind, 20);
+    if (!kind || !BOOKING_KINDS.includes(kind)) return bad(c, 'kind inválido (reserva|alquiler)');
+    sets.push('kind = ?'); binds.push(kind);
+  }
+  if ('client_id' in body) {
+    const clientId = num(body.client_id);
+    if (!(await clientInAgency(c.env.DB, (prop.agency_id as number | null) ?? null, clientId))) return bad(c, 'Contacto inválido');
+    sets.push('client_id = ?'); binds.push(clientId);
+  }
+  if (!sets.length) return bad(c, 'Nada para actualizar');
   const row = await c.env.DB
-    .prepare('UPDATE bookings SET kind = ? WHERE id = ? AND property_id = ? RETURNING *')
-    .bind(kind, bid, id)
+    .prepare(`UPDATE bookings SET ${sets.join(', ')} WHERE id = ? AND property_id = ? RETURNING *`)
+    .bind(...binds, bid, id)
     .first();
   if (!row) return notFound(c, 'Reserva no encontrada');
   return c.json({ booking: row });

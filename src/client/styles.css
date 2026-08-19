@@ -299,10 +299,60 @@ input, select, textarea { color: var(--fg); }
 .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
 .cal-dow { text-align: center; font-size: 11px; color: var(--muted); font-weight: 600; padding: 2px 0; }
-.cal-day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 13px; background: var(--bg); border: 1px solid var(--line); }
+/* Cada día es un botón: se toca uno para el "desde" y otro para el "hasta". */
+.cal-day { text-align: center; padding: 8px 0; border-radius: 8px; font-size: 13px; background: var(--bg); border: 1px solid var(--line); font-family: inherit; color: inherit; cursor: pointer; transition: background .12s, border-color .12s; }
+.cal-day:hover { border-color: var(--accent); }
+.cal-day:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .cal-day.booked { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
 .cal-day.booked-reserva { background: var(--warn); color: #fff; border-color: var(--warn); font-weight: 600; }
+/* Rango en curso de selección (días libres). NO puede parecerse a una reserva ya
+   cargada (que va en color sólido): va translúcido y con anillo. */
+.cal-day.cal-sel { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent); }
+.cal-day.cal-sel-edge { background: color-mix(in srgb, var(--accent) 32%, transparent); font-weight: 700; box-shadow: inset 0 0 0 2px var(--accent); }
+/* Días de la reserva enfocada desde la lista: anillo para ubicarla de un vistazo. */
+.cal-day.cal-focus { box-shadow: 0 0 0 2px var(--fg); }
 .bk-list { display: flex; flex-direction: column; gap: 6px; }
+.bk-row.bk-active { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+/* La franja de fechas lleva el calendario a ese mes: se muestra como clickeable. */
+.bk-when { cursor: pointer; border-radius: 6px; padding: 2px 4px; margin: -2px -4px; transition: background .15s; display: flex; flex-direction: column; gap: 1px; align-items: flex-start; }
+.bk-when:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.bk-when:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bk-dates { white-space: nowrap; }
+.bk-meta { font-size: 12px; }
+.bk-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* Píldoras claras con el borde del mismo color, un tono más oscuro: rellenas competían
+   con el CTA del modal ("Bloquear estas fechas"). */
+.bk-btn {
+  font: inherit; font-size: 12px; font-weight: 600; line-height: 1.2; cursor: pointer;
+  padding: 6px 13px; border-radius: 999px;
+  color: color-mix(in srgb, var(--ok) 75%, #000);
+  background: color-mix(in srgb, var(--ok) 12%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent);
+  transition: background .15s, border-color .15s, box-shadow .15s;
+}
+.bk-btn:hover { background: color-mix(in srgb, var(--ok) 20%, var(--panel)); border-color: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 15%, transparent); }
+.bk-btn:focus-visible { outline: 2px solid var(--ok); outline-offset: 1px; }
+.bk-btn.danger { color: var(--err); background: color-mix(in srgb, var(--err) 10%, var(--panel)); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.bk-btn.danger:hover { background: color-mix(in srgb, var(--err) 18%, var(--panel)); border-color: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 13%, transparent); }
+.bk-btn.danger:focus-visible { outline-color: var(--err); }
+/* Elegir contacto: el desplegable deja lugar al alta rápida que va a su derecha. */
+.picker-row { display: flex; gap: 8px; align-items: center; }
+.picker-row .picker-select { flex: 1 1 auto; min-width: 0; }
+.picker-row .picker-new { flex: 0 0 auto; gap: 6px; }
+/* "+ Agregar tipo nuevo…" al final del desplegable: separado y con el color de acento,
+   para que se lea como una acción y no como una opción más de la lista. */
+.select-new { margin-top: 4px; padding-top: 7px; border-top: 1px solid var(--line); color: var(--accent); font-weight: 600; }
+
+/* Selector de rango de fechas por almanaque (filtro de Inventario) */
+.date-range-field { position: relative; display: inline-flex; }
+.date-range-pop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 40; width: 260px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 14px;
+}
+.cal-day-pick { cursor: pointer; font: inherit; transition: background .12s, color .12s; }
+.cal-day-pick:hover { border-color: var(--accent); }
+.cal-day-pick.in-range { background: color-mix(in srgb, var(--accent) 16%, var(--panel)); border-color: var(--accent); }
+.cal-day-pick.edge { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
 .bk-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px; }
 
 /* Mapa de la inmobiliaria + menú contextual propio */
@@ -470,8 +520,6 @@ input, select, textarea { color: var(--fg); }
 /* Ajustes de gestión en mobile (los dashboards, no el marketplace SSR) */
 @media (max-width: 760px) {
   .filters > input, .filters > select { flex: 1 1 46%; min-width: 0; max-width: none !important; }
-  .filters .date-f { flex: 1 1 100%; }
-  .filters .date-f input { flex: 1; min-width: 0; }
   .panel-head { flex-wrap: wrap; gap: 10px; align-items: flex-start; }
   .panel-head > .row { width: 100%; }
   .panel-head > .row > .btn { flex: 1; }
