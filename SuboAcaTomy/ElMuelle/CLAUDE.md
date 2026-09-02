@@ -10,7 +10,7 @@ inmobiliaria online en `elmuelle.coopenstudio.com`.
 
 ## ⚠️ Acá NO hay código
 
-**El código vive en [`../../Places/`](../../Places/)** y es exactamente el mismo que
+**El código vive en [`../../Internas/Places/`](../../Internas/Places/)** y es exactamente el mismo que
 usa el deploy de Coopen. Esta carpeta tiene solo lo que es **de este cliente**: su
 config de deploy, sus datos y esta doc.
 
@@ -25,8 +25,8 @@ un flag o de config, no en una copia.
 
 | Dónde | Qué |
 |---|---|
-| [`../../Places/src/`](../../Places/src/) | El código (compartido) |
-| [`../../Places/wrangler.toml`](../../Places/wrangler.toml) | El bloque **`[env.elmuelle]`**: Worker, D1, R2 y dominio de este cliente |
+| [`../../Internas/Places/src/`](../../Internas/Places/src/) | El código (compartido) |
+| [`../../Internas/Places/wrangler.toml`](../../Internas/Places/wrangler.toml) | El bloque **`[env.elmuelle]`**: Worker, D1, R2 y dominio de este cliente |
 | `seed/` | Los datos de El Muelle (marca, propiedades, clientes, gastos) |
 | `_git-bundles/` | Respaldo de la historia del repo del que vino el código (gitignoreado) |
 
@@ -37,7 +37,7 @@ sacado del monorepo a una cuenta de Cloudflare y un OAuth de Google propios. Tra
 **4 migraciones más** que el Places del monorepo (`0011` login propio · `0012` método
 de pago en gastos · `0013` white-label · `0014` el calendario gobierna el estado).
 
-El 2026-08-02 ese código **volvió a ser el Places oficial** (`3-Apps/Places`) y se le
+El 2026-08-02 ese código **volvió a ser el Places oficial** (`3-Apps/Internas/Places`) y se le
 devolvió el SSO del ecosistema. Su `.git` se desconectó para que el código quedara
 versionado de verdad en el monorepo (un repo anidado se agrega como *embedded
 repository* y solo guarda un puntero roto); la historia quedó en `_git-bundles/`.
@@ -45,7 +45,7 @@ repository* y solo guarda un puntero roto); la historia quedó en `_git-bundles/
 ## Deploy
 
 ```bash
-cd d:/Coopen/Coopen/3-Apps/Places        # el código está ACÁ, no en la carpeta del cliente
+cd d:/Coopen/Coopen/3-Apps/Internas/Places        # el código está ACÁ, no en la carpeta del cliente
 pnpm install
 pnpm build
 npx wrangler deploy --env elmuelle       # → coopen-places-elmuelle + elmuelle.coopenstudio.com
@@ -126,7 +126,7 @@ Smoke post-deploy OK: `/` y `/buscar` 200 con las propiedades y sus fotos ·
   `site/keys.jpg` **hardcodeadas**; si faltan, el hero sale como un **rectángulo negro**
   (pasó acá). No están en ningún seed porque no son filas de la base, son parte del
   diseño del sitio. Copiarlas con `wrangler r2 object get/put` desde `coopen-places-media`.
-- **El código NO se toca acá.** Ver arriba: se cambia en `../../Places/` y beneficia a
+- **El código NO se toca acá.** Ver arriba: se cambia en `../../Internas/Places/` y beneficia a
   todos los deploys.
 - **`[env.X]` de wrangler no hereda** `vars`/`d1_databases`/`r2_buckets`/`routes` del
   top-level — hay que declararlos completos en el bloque del cliente.

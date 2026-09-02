@@ -29,7 +29,7 @@ export function ShareButton({ p, icon }: { p: Property; icon?: boolean }) {
   );
 }
 
-function ShareModal({ p, onClose }: { p: Property; onClose: () => void }) {
+export function ShareModal({ p, onClose }: { p: Property; onClose: () => void }) {
   const { url, title, text, full } = shareData(p);
   const canNative = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 

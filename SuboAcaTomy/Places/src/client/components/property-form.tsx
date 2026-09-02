@@ -1,7 +1,7 @@
 import { useEffect, useState, type ChangeEvent, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import { api, upload } from '../lib/api';
-import { mediaUrl, PRICE_PERIODS, type Branch, type Media, type Property } from '../lib/types';
+import { mediaUrl, PRICE_PERIODS, PROPERTY_KINDS, type Branch, type Media, type Property } from '../lib/types';
 import { AMENITIES, parseAmenities } from '../lib/amenities';
 import { toast } from '../lib/toast';
 import { LocationPicker } from './location-picker';
@@ -9,6 +9,7 @@ import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 
 const NONE = '_none';
+const NEW_KIND = '_new_kind';
 
 // Modal genérico de un input (reemplaza prompt()).
 export function AskModal({ title, label, placeholder, defaultValue, cta, onSubmit, onClose }: {
@@ -146,6 +147,7 @@ export function PropertyForm({ scope, branches, edit, initial, onClose, onSaved 
   const [created, setCreated] = useState<number | null>(null);
   const [media, setMedia] = useState<Media[]>([]);
   const [busy, setBusy] = useState(false);
+  const [creatingKind, setCreatingKind] = useState(false);
   const set = (k: keyof typeof emptyForm, v: string) => setF((s) => ({ ...s, [k]: v }));
   const close = () => { onSaved(); onClose(); };
 
@@ -250,7 +252,23 @@ export function PropertyForm({ scope, branches, edit, initial, onClose, onSaved 
                 <SelectItem value="temporario">Temporario</SelectItem>
               </SelectContent>
             </Select>
-            <input placeholder="Tipo (departamento, casa…)" value={f.kind} onChange={(e) => set('kind', e.target.value)} />
+            <Select value={f.kind} onValueChange={(v) => (v === NEW_KIND ? setCreatingKind(true) : set('kind', v))}>
+              <SelectTrigger><SelectValue placeholder="Tipo" /></SelectTrigger>
+              <SelectContent>
+                {/* Si el valor actual (dato viejo o importado de Argenprop) no está en la
+                    lista, se agrega como opción extra para que no se pierda de la vista. */}
+                {f.kind && !PROPERTY_KINDS.some((k) => k.v === f.kind) && <SelectItem value={f.kind}>{f.kind}</SelectItem>}
+                {PROPERTY_KINDS.map((k) => <SelectItem key={k.v} value={k.v}>{k.label}</SelectItem>)}
+                <SelectItem value={NEW_KIND} className="select-new">+ Agregar tipo nuevo…</SelectItem>
+              </SelectContent>
+            </Select>
+            {creatingKind && (
+              <AskModal
+                title="Nuevo tipo de propiedad" label="Ej: Quinta, Oficina, Cochera…" placeholder="Tipo" cta="Crear"
+                onSubmit={(v) => { set('kind', v); setCreatingKind(false); }}
+                onClose={() => setCreatingKind(false)}
+              />
+            )}
           </div>
           <div className="row2">
             <input type="number" placeholder="Precio" value={f.price} onChange={(e) => set('price', e.target.value)} />

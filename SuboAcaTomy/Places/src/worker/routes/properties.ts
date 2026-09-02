@@ -9,6 +9,9 @@ import { clientInAgency } from '../lib/ownership';
 // Cartera de propiedades de la inmobiliaria (no hay alta particular, ver POST /).
 export const properties = new Hono<AppEnv>();
 
+/** Tope de filas de /mine. El front lo compara para avisar si quedó gente afuera. */
+export const MINE_LIMIT = 1000;
+
 const OPERATIONS = ['venta', 'alquiler', 'temporario'];
 // disponible/reservada/alquilada se calculan desde bookings (COMPUTED_STATUS_SQL);
 // solo estos dos son asignables a mano vía PATCH (vender / revertir venta).
@@ -29,7 +32,7 @@ properties.get('/mine', async (c) => {
       `SELECT p.id, p.owner_kind, p.operation, p.kind, p.title, p.price, p.currency, p.price_period, p.city, p.province,
               p.address, p.description, p.lat, p.lng, p.rooms, p.area_m2, p.bathrooms, p.capacity, p.amenities,
               p.available_from, p.available_until,
-              ${COMPUTED_STATUS_SQL} AS status, p.published, p.archived_at, p.branch_id, b.name AS branch_name, p.created_at,
+              ${COMPUTED_STATUS_SQL} AS status, p.published, p.archived_at, p.branch_id, b.name AS branch_name, p.created_at, p.updated_at,
               (SELECT r2_key FROM property_media pm WHERE pm.property_id = p.id ORDER BY pm.sort LIMIT 1) AS cover_key,
               (SELECT COUNT(*) FROM property_media pm2 WHERE pm2.property_id = p.id) AS photos,
               (SELECT COALESCE(SUM(count), 0) FROM property_views v WHERE v.property_id = p.id) AS views,
@@ -47,11 +50,15 @@ properties.get('/mine', async (c) => {
                 WHERE m.property_id = p.id AND m.agency_id = p.agency_id LIMIT 1) AS owner_client_name
        FROM properties p LEFT JOIN branches b ON b.id = p.branch_id
        WHERE p.owner_user_id = ? OR p.agency_id = ?
-       ORDER BY p.created_at DESC LIMIT 200`,
+       -- El tope existe para que una cartera grande no tumbe la request; el panel avisa
+       -- en pantalla cuando lo toca (el cliente que llega de BuscadorProp trae ~1000).
+       ORDER BY p.created_at DESC LIMIT ${MINE_LIMIT}`,
     )
     .bind(c.var.user.id, agencyId)
     .all();
-  return c.json({ properties: res.results });
+  // `capped` avisa que el tope dejó filas afuera: sin esto el panel muestra un total
+  // que miente (y el cliente que llega de BuscadorProp trae ~1000 propiedades).
+  return c.json({ properties: res.results, capped: res.results.length >= MINE_LIMIT });
 });
 
 // Crear propiedad. Solo inmobiliarias (cartera gateada por la suscripción) —

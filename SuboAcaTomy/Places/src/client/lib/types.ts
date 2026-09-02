@@ -60,6 +60,9 @@ export type Property = {
   branch_id: number | null;
   branch_name: string | null;
   bookings: string | null;
+  created_at?: string | null;
+  /** Lo trae /mine — es el "Últ. modificación" de la fila del Inventario. */
+  updated_at?: string | null;
 };
 
 export type PropertyStats = {
@@ -188,6 +191,21 @@ export type Match = {
 
 export const STATUSES = ['disponible', 'reservada', 'alquilada', 'vendida'] as const;
 
+// Tipos de propiedad predefinidos (dropdown del alta/edición). `kind` en la base sigue
+// siendo texto libre (sin CHECK ni enum) — así una propiedad importada de Argenprop o
+// cargada antes de este dropdown, con un valor que no está en esta lista, se sigue
+// mostrando bien (ver el fallback en property-form.tsx) en vez de perderse.
+export const PROPERTY_KINDS: { v: string; label: string }[] = [
+  { v: 'casa', label: 'Casas/Chalet' },
+  { v: 'duplex', label: 'Duplex/Triplex' },
+  { v: 'departamento', label: 'Departamento' },
+  { v: 'ph', label: 'PH' },
+  { v: 'lote', label: 'Lotes' },
+  { v: 'local', label: 'Locales' },
+  { v: 'cabana', label: 'Cabañas' },
+  { v: 'apart', label: 'Apart' },
+];
+
 export const PRICE_PERIODS: { v: string; label: string; suffix: string }[] = [
   { v: '', label: 'Sin especificar', suffix: '' },
   { v: 'mes', label: 'Por mes', suffix: '/mes' },
@@ -196,7 +214,7 @@ export const PRICE_PERIODS: { v: string; label: string; suffix: string }[] = [
   { v: 'semana', label: 'Por semana', suffix: '/semana' },
   { v: 'total', label: 'Precio total', suffix: '' },
 ];
-const PERIOD_SUFFIX: Record<string, string> = Object.fromEntries(PRICE_PERIODS.map((p) => [p.v, p.suffix]));
+export const PERIOD_SUFFIX: Record<string, string> = Object.fromEntries(PRICE_PERIODS.map((p) => [p.v, p.suffix]));
 
 export function money(price: number | null, currency = 'USD', period?: string | null): string {
   if (price == null) return 'Consultar';

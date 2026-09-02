@@ -1,67 +1,29 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, Calendar as CalendarIcon, Camera, Check, ChevronDown, ChevronLeft,
-  ChevronRight, ChevronUp, Download, Link as LinkIcon, Pencil, Send, Trash2, X,
+  Calendar as CalendarIcon, ChevronLeft, ChevronRight, Download, EyeOff,
+  Search, SlidersHorizontal, Tag, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { cn } from '../lib/cn';
-import { mediaUrl, money, STATUSES, type Branch, type Media, type Property } from '../lib/types';
-import { AMENITIES, parseAmenities } from '../lib/amenities';
+import { mediaUrl, STATUSES, type Branch, type Media, type Property } from '../lib/types';
 import { toast } from '../lib/toast';
 import { prefetchClients } from '../lib/clients-cache';
 import { CalendarModal } from './calendar-modal';
-import { AskModal, Modal, PhotoManager, PropertyForm } from './property-form';
+import { AskModal, PhotoManager, PropertyForm } from './property-form';
+import { PropertyRow } from './property-row';
 import { StatsModal } from './stats-modal';
-import { ShareButton } from './share-button';
-import { useIsMobile } from '../lib/use-mobile';
 import { Button } from './ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useConfirm } from './ui/use-confirm';
+
+/** Filas por página. El listado del cliente que llega de BuscadorProp puede traer
+ *  ~1000: pintarlas todas traba el navegador (gotcha del manual raíz §5). */
+const PAGE_SIZE = 50;
 
 // Sentinels para <Select> (Radix no permite value="" en un Item) — nunca viajan al backend.
 const ALL = '_all';
 const NONE = '_none';
 
-const STATUS_COLOR: Record<string, string> = {
-  disponible: 'text-ok',
-  reservada: 'text-warn',
-  alquilada: 'text-muted-foreground',
-  vendida: 'text-muted-foreground',
-};
-
-const KIND_LABEL: Record<string, string> = { reserva: 'Reservada', alquiler: 'Alquilada' };
-
-// Etiqueta de solo lectura: disponible/reservada/alquilada se calculan desde el
-// calendario, ya no se eligen a mano (ver SaleActions para el único estado manual).
-function StatusChip({ status }: { status: string }) {
-  return <span className={cn('status-chip', STATUS_COLOR[status])}>{status}</span>;
-}
-
-// Único estado manual (vendida) + archivado (solo permitido desde vendida). Se repite
-// igual en PropertyCard/PropertyRow/PropertyMobileCard, cada uno ya tiene su propio
-// `patch`/`confirm` locales.
-function SaleActions({ p, patch, confirm }: {
-  p: Property; patch: (body: Record<string, unknown>) => Promise<void>; confirm: ReturnType<typeof useConfirm>;
-}) {
-  if (p.archived_at) {
-    return <Button variant="ghost" size="sm" onClick={() => patch({ archived: false })}>Desarchivar</Button>;
-  }
-  if (p.status === 'vendida') {
-    return (
-      <>
-        <Button variant="ghost" size="sm" onClick={() => patch({ status: 'disponible' })}>Reactivar</Button>
-        <Button variant="ghost" size="sm" onClick={async () => {
-          if (await confirm(`¿Archivar "${p.title}"? Deja de aparecer en Inventario (y se despublica); queda como historial.`)) patch({ archived: true });
-        }}>Archivar</Button>
-      </>
-    );
-  }
-  return (
-    <Button variant="ghost" size="sm" onClick={async () => {
-      if (await confirm(`¿Marcar "${p.title}" como vendida? Deja de aceptar nuevas reservas o alquileres.`)) patch({ status: 'vendida' });
-    }}>Marcar como vendida</Button>
-  );
-}
 
 // ¿Hay alguna reserva que se solape con el rango [from, to]? (test de solapamiento de intervalos)
 function bookedInRange(bookingsJson: string | null, from: string, to: string): boolean {
@@ -69,38 +31,76 @@ function bookedInRange(bookingsJson: string | null, from: string, to: string): b
   catch { return false; }
 }
 
-const origin = typeof window !== 'undefined' ? window.location.origin : '';
-const AMEN_MAP = new Map(AMENITIES.map((a) => [a.key, a]));
+const pad = (n: number) => String(n).padStart(2, '0');
+const fmtShort = (d: string) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+
+// Selector de rango de fechas por almanaque clickeable (mismo gesto que el CalendarModal
+// de reservas), para reemplazar el par de <input type=date> del filtro de Inventario.
+function DateRangePicker({ from, to, onChange }: { from: string; to: string; onChange: (from: string, to: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const now = new Date();
+  const [ym, setYm] = useState({ y: now.getFullYear(), m: now.getMonth() });
+
+  useEffect(() => {
+    if (!open) return;
+    function onDocClick(e: MouseEvent) { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); }
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  const first = new Date(ym.y, ym.m, 1).getDay();
+  const days = new Date(ym.y, ym.m + 1, 0).getDate();
+  const cells: (string | null)[] = [...Array(first).fill(null), ...Array.from({ length: days }, (_, i) => `${ym.y}-${pad(ym.m + 1)}-${pad(i + 1)}`)];
+  const monthName = new Date(ym.y, ym.m, 1).toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
+  const shift = (d: number) => setYm(({ y, m }) => { const nd = new Date(y, m + d, 1); return { y: nd.getFullYear(), m: nd.getMonth() }; });
+
+  // 1er click abre el rango, 2do lo cierra, y NO importa el orden: la fecha menor queda
+  // de "desde". Mismo criterio que el calendario de reservas (calendar-modal.tsx).
+  function pick(d: string) {
+    if (!from || to) { onChange(d, ''); return; }
+    onChange(d < from ? d : from, d < from ? from : d);
+  }
+
+  const label = from && to ? `${fmtShort(from)} → ${fmtShort(to)}` : from ? `${fmtShort(from)} → …` : 'Fechas';
+
+  return (
+    <div className="date-range-field" ref={ref}>
+      <Button type="button" variant="outline" size="sm" onClick={() => setOpen((o) => !o)}>
+        <CalendarIcon className="h-4 w-4" />{label}
+      </Button>
+      {open && (
+        <div className="date-range-pop">
+          <div className="cal-head">
+            <Button variant="ghost" size="icon" onClick={() => shift(-1)}><ChevronLeft className="h-4 w-4" /></Button>
+            <b style={{ textTransform: 'capitalize' }}>{monthName}</b>
+            <Button variant="ghost" size="icon" onClick={() => shift(1)}><ChevronRight className="h-4 w-4" /></Button>
+          </div>
+          <div className="cal-grid">
+            {['D', 'L', 'M', 'M', 'J', 'V', 'S'].map((d, i) => <div key={i} className="cal-dow">{d}</div>)}
+            {cells.map((d, i) => {
+              if (!d) return <div key={i} />;
+              const inRange = !!from && !!to && d >= from && d <= to;
+              const isEdge = d === from || d === to;
+              return (
+                <button key={i} type="button" className={cn('cal-day', 'cal-day-pick', inRange && 'in-range', isEdge && 'edge')} onClick={() => pick(d)}>
+                  {Number(d.slice(-2))}
+                </button>
+              );
+            })}
+          </div>
+          <div className="row" style={{ justifyContent: 'space-between', marginTop: 10 }}>
+            <button type="button" className="link-btn" onClick={() => onChange('', '')}>Limpiar</button>
+            <Button size="sm" onClick={() => setOpen(false)}>Listo</Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Filtro preseteado desde los KPIs del Resumen. */
 export type PropPreset = { status?: string; branch?: number; op?: string; published?: string };
-
-// Link wa.me para MANDARLE la info de una propiedad al cliente (número del cliente).
-function clientWaLink(numRaw: string, p: Property): string {
-  const digits = numRaw.replace(/\D/g, '');
-  const facts = [p.rooms ? `${p.rooms} amb` : null, p.capacity ? `${p.capacity} personas` : null, p.area_m2 ? `${p.area_m2} m²` : null].filter(Boolean).join(' · ');
-  const loc = [p.city, p.province].filter(Boolean).join(', ');
-  const msg = `¡Hola! Te paso la info de esta propiedad:\n\n🏡 ${p.title}\n💵 ${money(p.price, p.currency, p.price_period)}${loc ? `\n📍 ${loc}` : ''}${facts ? `\n${facts}` : ''}\n\nVer más: ${origin}/propiedad/${p.id}`;
-  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
-}
-
-// Botón "Enviar al cliente" con modal para el WhatsApp del cliente.
-function SendToClientButton({ p, icon }: { p: Property; icon?: boolean }) {
-  const [open, setOpen] = useState(false);
-  function send(num: string) {
-    if (num.replace(/\D/g, '').length < 8) { toast('Número inválido (con código de país)', 'err'); return; }
-    setOpen(false);
-    window.open(clientWaLink(num, p), '_blank');
-  }
-  return (
-    <>
-      {icon
-        ? <Button variant="ghost" size="icon" title="Enviar al cliente por WhatsApp" onClick={() => setOpen(true)}><Send className="h-4 w-4" /></Button>
-        : <Button size="sm" onClick={() => setOpen(true)}>Enviar al cliente</Button>}
-      {open && <AskModal title="Enviar al cliente" label="WhatsApp del cliente (con código de país)" placeholder="5493415551234" cta="Enviar por WhatsApp" onSubmit={send} onClose={() => setOpen(false)} />}
-    </>
-  );
-}
 
 // Importar una propiedad desde un link de Argenprop (extrae datos + fotos).
 export function ImportArgenprop({ scope, onImported }: { scope: 'agency' | 'particular'; onImported: () => void }) {
@@ -122,64 +122,6 @@ export function ImportArgenprop({ scope, onImported }: { scope: 'agency' | 'part
       </Button>
       {open && <AskModal title="Importar de Argenprop" label="Pegá el link de la propiedad en Argenprop." placeholder="https://www.argenprop.com/..." cta="Importar" onSubmit={run} onClose={() => setOpen(false)} />}
     </>
-  );
-}
-
-// Card de propiedad (formato tarjeta) — usada en el home del propietario particular.
-export function PropertyCard({ p, branches, onManage, onEdit, onCalendar, onReload }: {
-  p: Property; branches?: Branch[]; onManage: () => void; onEdit: () => void; onCalendar: () => void; onReload: () => void;
-}) {
-  const confirm = useConfirm();
-  const [copied, setCopied] = useState(false);
-  const [stats, setStats] = useState(false);
-  async function patch(body: Record<string, unknown>) {
-    try { await api(`/api/properties/${p.id}`, { method: 'PATCH', body: JSON.stringify(body) }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  async function del() {
-    if (!(await confirm(`¿Eliminar "${p.title}"? No se puede deshacer.`, { destructive: true, confirmLabel: 'Eliminar' }))) return;
-    try { await api(`/api/properties/${p.id}`, { method: 'DELETE' }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  function copyLink() {
-    navigator.clipboard?.writeText(`${origin}/propiedad/${p.id}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-  }
-  const facts = [p.rooms ? `🛏 ${p.rooms}` : null, p.bathrooms ? `🚿 ${p.bathrooms}` : null, p.capacity ? `👥 ${p.capacity}` : null, p.area_m2 ? `${p.area_m2} m²` : null].filter(Boolean).join(' · ');
-  const amen = parseAmenities(p.amenities);
-  return (
-    <div className="prop-card">
-      <div className="prop-thumb">{p.cover_key ? <img src={mediaUrl(p.cover_key)} alt="" /> : <span className="ph-ic">🏡</span>}</div>
-      <div className="prop-info">
-        <div className="prop-title">{p.title}</div>
-        <div className="prop-meta"><span className="tag">{p.operation}</span><b>{money(p.price, p.currency, p.price_period)}</b>{facts && <span className="muted small">· {facts}</span>}</div>
-        {amen.length > 0 && (
-          <div className="amen-row">
-            {amen.map((k) => { const a = AMEN_MAP.get(k); return a ? <span className="amen-chip" key={k}>{a.icon} {a.label}</span> : null; })}
-          </div>
-        )}
-        <div className="prop-controls">
-          <label>Disponibilidad
-            <StatusChip status={p.status} />
-          </label>
-          <button className="views-chip" onClick={() => setStats(true)} title="Ver estadísticas de visitas">👁 {p.views ?? 0} visita{(p.views ?? 0) === 1 ? '' : 's'}</button>
-        </div>
-      </div>
-      <div className="prop-actions">
-        <SendToClientButton p={p} />
-        <div className="prop-links">
-          <ShareButton p={p} />
-          <Button variant="ghost" size="sm" onClick={() => setStats(true)}><BarChart3 className="h-4 w-4" />Estadísticas</Button>
-          <Button variant="ghost" size="sm" onClick={onEdit}><Pencil className="h-4 w-4" />Editar</Button>
-          <Button variant="ghost" size="sm" onClick={copyLink}>{copied ? <Check className="h-4 w-4 text-ok" /> : <LinkIcon className="h-4 w-4" />}{copied ? 'Copiado' : 'Copiar link'}</Button>
-          <Button variant="ghost" size="sm" onClick={onManage}><Camera className="h-4 w-4" />Fotos</Button>
-          <Button variant="ghost" size="sm" onClick={onCalendar}><CalendarIcon className="h-4 w-4" />Reservas</Button>
-          <Button variant="ghost" size="sm" onClick={() => patch({ published: !p.published })}>{p.published ? 'Despublicar' : 'Publicar'}</Button>
-          <SaleActions p={p} patch={patch} confirm={confirm} />
-          <Button variant="ghost" size="sm" onClick={del} className="text-destructive hover:bg-destructive/10 hover:text-destructive"><Trash2 className="h-4 w-4" />Eliminar</Button>
-        </div>
-      </div>
-      {stats && <StatsModal property={p} onClose={() => setStats(false)} />}
-    </div>
   );
 }
 
@@ -209,165 +151,6 @@ function Lightbox({ media, onClose }: { media: Media[]; onClose: () => void }) {
   );
 }
 
-// Fila de la planilla (+ detalle desplegable).
-function PropertyRow({ p, branches, expanded, checked, onSelect, onToggle, onManage, onEdit, onCalendar, onLightbox, onStats, onReload }: {
-  p: Property; branches: Branch[]; expanded: boolean; checked: boolean; onSelect: () => void;
-  onToggle: () => void; onManage: () => void; onEdit: () => void; onCalendar: () => void; onLightbox: (p: Property) => void; onStats: () => void; onReload: () => void;
-}) {
-  const confirm = useConfirm();
-  const [copied, setCopied] = useState(false);
-  async function patch(body: Record<string, unknown>) {
-    try { await api(`/api/properties/${p.id}`, { method: 'PATCH', body: JSON.stringify(body) }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  async function del() {
-    if (!(await confirm(`¿Eliminar "${p.title}"? No se puede deshacer.`, { destructive: true, confirmLabel: 'Eliminar' }))) return;
-    try { await api(`/api/properties/${p.id}`, { method: 'DELETE' }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  function copyLink() {
-    navigator.clipboard?.writeText(`${origin}/propiedad/${p.id}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-  }
-  const specs = [p.rooms ? `🛏${p.rooms}` : null, p.bathrooms ? `🚿${p.bathrooms}` : null, p.capacity ? `👥${p.capacity}` : null, p.area_m2 ? `${p.area_m2}m²` : null].filter(Boolean).join(' ');
-  const amen = parseAmenities(p.amenities);
-  return (
-    <>
-      <tr className={checked ? 'srow sel' : 'srow'}>
-        <td className="c-check"><input type="checkbox" checked={checked} onChange={onSelect} /></td>
-        <td className="c-thumb" onClick={() => onLightbox(p)} title="Ver galería de fotos">
-          <div className="thumb-wrap">
-            {p.cover_key ? <img className="thumb-sm" src={mediaUrl(p.cover_key)} alt="" /> : <span className="thumb-sm ph">🏡</span>}
-            {(p.photos ?? 0) > 1 && <span className="thumb-count">📷 {p.photos}</span>}
-          </div>
-        </td>
-        <td className="c-title" onClick={onToggle}><div className="st-title">{p.title}</div><div className="muted small">{[p.city, p.province].filter(Boolean).join(', ') || '—'}</div></td>
-        <td><span className="tag">{p.operation}</span></td>
-        <td className="c-price">{money(p.price, p.currency, p.price_period)}</td>
-        <td className="muted small nowrap">{specs || '—'}<span className="row-views" title="Visitas"> · 👁 {p.views ?? 0}</span></td>
-        <td>
-          <Select value={p.branch_id != null ? String(p.branch_id) : NONE} onValueChange={(v) => patch({ branch_id: v === NONE ? null : Number(v) })}>
-            <SelectTrigger className="h-8 min-w-[120px] text-xs"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>— sucursal</SelectItem>
-              {branches.map((b) => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </td>
-        <td><StatusChip status={p.status} /></td>
-        <td>
-          <button className={p.published ? 'pub on' : 'pub'} title={p.published ? 'Publicada — click para despublicar' : 'Borrador — click para publicar'} onClick={() => patch({ published: !p.published })}>{p.published ? '●' : '○'}</button>
-        </td>
-        <td className="c-actions">
-          <SendToClientButton p={p} icon />
-          <ShareButton p={p} icon />
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Estadísticas de visitas" onClick={onStats}><BarChart3 className="h-4 w-4" /></Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Copiar link" onClick={copyLink}>{copied ? <Check className="h-4 w-4 text-ok" /> : <LinkIcon className="h-4 w-4" />}</Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Editar datos" onClick={onEdit}><Pencil className="h-4 w-4" /></Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Gestionar fotos" onClick={onManage}><Camera className="h-4 w-4" /></Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Reservas / calendario" onClick={onCalendar}><CalendarIcon className="h-4 w-4" /></Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive" title="Eliminar" onClick={del}><Trash2 className="h-4 w-4" /></Button>
-          <Button variant="ghost" size="icon" className="h-8 w-8" title="Ver detalle" onClick={onToggle}>{expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</Button>
-        </td>
-      </tr>
-      {expanded && (
-        <tr className="sdetail">
-          <td colSpan={10}>
-            <div className="sd-grid">
-              <div>
-                <b>Detalle</b>
-                <div className="muted">{[p.rooms && `${p.rooms} ambientes`, p.bathrooms && `${p.bathrooms} baños`, p.capacity && `${p.capacity} personas`, p.area_m2 && `${p.area_m2} m²`].filter(Boolean).join(' · ') || '—'}</div>
-                {p.address && <div className="muted small">📍 {p.address}</div>}
-                {(p.available_from || p.available_until) && <div className="muted small">🗓 {p.available_from || '…'} → {p.available_until || '…'}</div>}
-              </div>
-              <div>
-                <b>Comodidades</b>
-                <div className="amen-row">{amen.length ? amen.map((k) => { const a = AMEN_MAP.get(k); return a ? <span className="amen-chip" key={k}>{a.icon} {a.label}</span> : null; }) : <span className="muted">—</span>}</div>
-              </div>
-            </div>
-            {p.description && <p className="sd-desc">{p.description}</p>}
-            <div className="row" style={{ gap: 14 }}>
-              <Button variant="ghost" size="sm" onClick={() => onLightbox(p)}>Ver fotos</Button>
-              <Button variant="ghost" size="sm" onClick={onManage}><Camera className="h-4 w-4" />Gestionar fotos</Button>
-              <a className="link-btn" href={`/propiedad/${p.id}`} target="_blank" rel="noreferrer">↗ Ver publicación</a>
-              <SaleActions p={p} patch={patch} confirm={confirm} />
-            </div>
-          </td>
-        </tr>
-      )}
-    </>
-  );
-}
-
-// Versión mobile de la fila: card apilada con las mismas acciones (la tabla es innavegable en el cel).
-function PropertyMobileCard({ p, branches, checked, onSelect, onManage, onEdit, onCalendar, onLightbox, onStats, onReload }: {
-  p: Property; branches: Branch[]; checked: boolean; onSelect: () => void;
-  onManage: () => void; onEdit: () => void; onCalendar: () => void; onLightbox: (p: Property) => void; onStats: () => void; onReload: () => void;
-}) {
-  const confirm = useConfirm();
-  const [copied, setCopied] = useState(false);
-  async function patch(body: Record<string, unknown>) {
-    try { await api(`/api/properties/${p.id}`, { method: 'PATCH', body: JSON.stringify(body) }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  async function del() {
-    if (!(await confirm(`¿Eliminar "${p.title}"? No se puede deshacer.`, { destructive: true, confirmLabel: 'Eliminar' }))) return;
-    try { await api(`/api/properties/${p.id}`, { method: 'DELETE' }); onReload(); }
-    catch (e) { toast(String((e as Error).message), 'err'); }
-  }
-  function copyLink() {
-    navigator.clipboard?.writeText(`${origin}/propiedad/${p.id}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
-  }
-  const loc = [p.city, p.province].filter(Boolean).join(', ');
-  const specs = [p.rooms ? `🛏${p.rooms}` : null, p.bathrooms ? `🚿${p.bathrooms}` : null, p.capacity ? `👥${p.capacity}` : null, p.area_m2 ? `${p.area_m2}m²` : null].filter(Boolean).join(' ');
-  const amen = parseAmenities(p.amenities);
-  return (
-    <div className={checked ? 'mcard sel' : 'mcard'}>
-      <div className="mcard-top">
-        <input type="checkbox" checked={checked} onChange={onSelect} />
-        <div className="mcard-thumb" onClick={() => onLightbox(p)} title="Ver fotos">
-          {p.cover_key ? <img src={mediaUrl(p.cover_key)} alt="" /> : <span className="ph">🏡</span>}
-          {(p.photos ?? 0) > 1 && <span className="thumb-count">📷 {p.photos}</span>}
-        </div>
-        <div className="mcard-main">
-          <div className="mcard-title" onClick={onEdit}>{p.title}</div>
-          <div className="muted small">{loc || '—'}</div>
-          <div className="mcard-price"><span className="tag">{p.operation}</span> <b>{money(p.price, p.currency, p.price_period)}</b></div>
-          <div className="muted small">{specs || '—'} · 👁 {p.views ?? 0}</div>
-        </div>
-      </div>
-      {amen.length > 0 && <div className="amen-row">{amen.map((k) => { const a = AMEN_MAP.get(k); return a ? <span className="amen-chip" key={k}>{a.icon} {a.label}</span> : null; })}</div>}
-      <div className="mcard-selects">
-        <label className="fld">Estado
-          <StatusChip status={p.status} />
-        </label>
-        <label className="fld">Sucursal
-          <Select value={p.branch_id != null ? String(p.branch_id) : NONE} onValueChange={(v) => patch({ branch_id: v === NONE ? null : Number(v) })}>
-            <SelectTrigger className="h-9 text-sm"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>—</SelectItem>
-              {branches.map((b) => <SelectItem key={b.id} value={String(b.id)}>{b.name}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </label>
-        <button className={p.published ? 'pub on' : 'pub'} onClick={() => patch({ published: !p.published })}>{p.published ? '● Publicada' : '○ Borrador'}</button>
-      </div>
-      <div className="mcard-actions">
-        <Button variant="secondary" size="sm" onClick={onStats}><BarChart3 className="h-4 w-4" />Stats</Button>
-        <SendToClientButton p={p} icon />
-        <ShareButton p={p} icon />
-        <Button variant="ghost" size="icon" title="Copiar link" onClick={copyLink}>{copied ? <Check className="h-4 w-4 text-ok" /> : <LinkIcon className="h-4 w-4" />}</Button>
-        <Button variant="ghost" size="icon" title="Editar" onClick={onEdit}><Pencil className="h-4 w-4" /></Button>
-        <Button variant="ghost" size="icon" title="Fotos" onClick={onManage}><Camera className="h-4 w-4" /></Button>
-        <Button variant="ghost" size="icon" title="Reservas" onClick={onCalendar}><CalendarIcon className="h-4 w-4" /></Button>
-        <Button variant="ghost" size="icon" className="text-destructive hover:bg-destructive/10 hover:text-destructive" title="Eliminar" onClick={del}><Trash2 className="h-4 w-4" /></Button>
-      </div>
-      <div className="mcard-actions">
-        <SaleActions p={p} patch={patch} confirm={confirm} />
-      </div>
-    </div>
-  );
-}
-
 const EMPTY_F = { text: '', op: '', status: '', branch: '', priceMax: '', currency: 'ARS', capacity: '', dateFrom: '', dateTo: '', published: '', archived: false };
 
 export function PropertiesPanel({ branches, onChanged, preset }: { branches: Branch[]; onChanged?: () => void; preset?: PropPreset }) {
@@ -384,13 +167,18 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [f, setF] = useState({ ...EMPTY_F });
   const set = (k: keyof typeof EMPTY_F, v: string) => setF((s) => ({ ...s, [k]: v }));
-  const isMobile = useIsMobile();
+  const [showFilters, setShowFilters] = useState(false);
+  const [page, setPage] = useState(0);
+  const [capped, setCapped] = useState(false);
 
-  const load = () => api<{ properties: Property[] }>('/api/properties/mine').then((r) => setProps(r.properties)).catch(() => {});
+  const load = () => api<{ properties: Property[]; capped?: boolean }>('/api/properties/mine')
+    .then((r) => { setProps(r.properties); setCapped(!!r.capped); })
+    .catch(() => {});
   useEffect(() => { load(); prefetchClients(); }, []);
   useEffect(() => {
     if (!preset) return;
     setF({ ...EMPTY_F, status: preset.status || '', branch: preset.branch != null ? String(preset.branch) : '', op: preset.op || '', published: preset.published || '' });
+    setShowFilters(true);
   }, [preset]);
   const reload = () => { load(); onChanged?.(); };
 
@@ -404,8 +192,6 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
     await Promise.all([...selected].map((id) => api(`/api/properties/${id}`, { method: 'DELETE' }).catch(() => {})));
     setSelected(new Set()); reload();
   }
-  function sortBy(key: string) { setSort((s) => (s && s.key === key ? { key, dir: (s.dir === 1 ? -1 : 1) } : { key, dir: 1 })); }
-  const sortMark = (key: string) => (sort?.key === key ? (sort.dir === 1 ? ' ▲' : ' ▼') : '');
 
   async function openLightbox(p: Property) {
     try {
@@ -433,11 +219,12 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
     // convierte el filtro en ruido (decisión de Charly, 2026-08-07).
     if (f.capacity && p.capacity !== Number(f.capacity)) return false;
     if (f.dateFrom || f.dateTo) {
-      // Rango pedido: la propiedad debe estar disponible TODO el tramo [from, to] y sin reservas que se solapen.
+      // Solo excluye si hay una reserva que se solape. "Disponible desde/hasta" es la
+      // temporada habitual del anuncio, no un bloqueo de fechas: si no hay una reserva
+      // puntual en el medio, la propiedad SÍ está libre para el rango (decisión de
+      // producto, 2026-08-20 — antes también filtraba por esa ventana).
       const from = f.dateFrom || f.dateTo;
       const to = f.dateTo || f.dateFrom;
-      if (p.available_from && p.available_from > from) return false;
-      if (p.available_until && p.available_until < to) return false;
       if (bookedInRange(p.bookings, from, to)) return false;
     }
     return true;
@@ -450,20 +237,104 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
     const av = String(a[k] ?? '').toLowerCase(); const bv = String(b[k] ?? '').toLowerCase();
     return av < bv ? -sort.dir : av > bv ? sort.dir : 0;
   }) : filtered;
-  const allSel = sorted.length > 0 && sorted.every((p) => selected.has(p.id));
-  const toggleAll = () => setSelected(allSel ? new Set() : new Set(sorted.map((p) => p.id)));
+
+  // Con Desde/Hasta activo, el chip de Estado tiene que hablar DEL RANGO, no del estado
+  // global de hoy: una casa con una reserva en otro mes está libre en las fechas buscadas
+  // y mostrarla como "Reservada" confunde. Y como el filtro de arriba ya sacó del listado
+  // a toda la que tenga una reserva solapada, lo que queda ES lo disponible en el rango.
+  const dateActive = !!(f.dateFrom || f.dateTo);
+  const displayRows = dateActive
+    ? sorted.map((p) => (p.status === 'vendida' || p.status === 'disponible' ? p : { ...p, status: 'disponible' }))
+    : sorted;
+
+  // Los KPIs cuentan sobre lo NO archivado (que es lo que el panel muestra por defecto):
+  // sumar las archivadas daría un total que no coincide con ninguna lista de la pantalla.
+  const kpis = useMemo(() => {
+    const vivas = props.filter((p) => !p.archived_at);
+    const porOp = (op: string) => vivas.filter((p) => p.operation === op).length;
+    return {
+      total: vivas.length,
+      venta: porOp('venta'),
+      alquiler: porOp('alquiler'),
+      temporario: porOp('temporario'),
+      sinPublicar: vivas.filter((p) => !p.published).length,
+      publicadas: vivas.filter((p) => p.published).length,
+    };
+  }, [props]);
+
+  // Cuántos filtros hay puestos, sin contar la búsqueda (que vive afuera del panel
+  // plegable) ni el toggle de archivadas: es el número del badge de "Más filtros".
+  const activeFilters = (['op', 'status', 'branch', 'priceMax', 'capacity', 'published'] as const)
+    .filter((k) => !!f[k]).length + (f.dateFrom || f.dateTo ? 1 : 0);
+
+  // Un cambio de filtro puede dejarte parado en una página que ya no existe.
+  const pages = Math.max(1, Math.ceil(displayRows.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  useEffect(() => { setPage(0); }, [f.text, f.op, f.status, f.branch, f.priceMax, f.currency, f.capacity, f.dateFrom, f.dateTo, f.published, f.archived, sort]);
+  const pageRows = displayRows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  const allSel = pageRows.length > 0 && pageRows.every((p) => selected.has(p.id));
+  const toggleAll = () => setSelected(allSel ? new Set() : new Set(pageRows.map((p) => p.id)));
+  /** Hay más resultados que los de esta página y todavía no están todos marcados. */
+  const canSelectAllMatches = allSel && displayRows.length > pageRows.length && selected.size < displayRows.length;
+  const shownFrom = displayRows.length ? safePage * PAGE_SIZE + 1 : 0;
+  const shownTo = Math.min(displayRows.length, (safePage + 1) * PAGE_SIZE);
+
+  /** Un KPI clickeado deja SOLO ese filtro puesto (no se acumulan entre sí). */
+  const applyKpi = (patch: Partial<typeof EMPTY_F>) => { setF({ ...EMPTY_F, ...patch }); setShowFilters(true); };
 
   return (
     <div>
       <div className="panel-head">
-        <h3>Inventario · {filtered.length} de {props.length}</h3>
+        <div className="phead-title">
+          <h3>Mis propiedades</h3>
+          <p className="muted small">{props.length} propiedad{props.length === 1 ? '' : 'es'} cargada{props.length === 1 ? '' : 's'}</p>
+        </div>
         <div className="row" style={{ gap: 8 }}>
           <ImportArgenprop scope="agency" onImported={reload} />
           <Button onClick={() => setShowNew(true)}>Nueva propiedad</Button>
         </div>
       </div>
-      <div className="filters">
-        <input placeholder="Buscar título / ciudad" value={f.text} onChange={(e) => set('text', e.target.value)} />
+
+      <div className="pkpis">
+        <button type="button" className="pkpi" onClick={() => applyKpi({ op: 'venta' })}>
+          <Tag className="pkpi-ic" /><b>{kpis.venta}</b><span>En venta</span>
+        </button>
+        <button type="button" className="pkpi" onClick={() => applyKpi({ op: 'alquiler' })}>
+          <Tag className="pkpi-ic" /><b>{kpis.alquiler}</b><span>En alquiler</span>
+        </button>
+        <button type="button" className="pkpi" onClick={() => applyKpi({ op: 'temporario' })}>
+          <CalendarIcon className="pkpi-ic" /><b>{kpis.temporario}</b><span>Temporario</span>
+        </button>
+        <button type="button" className={cn('pkpi', kpis.sinPublicar > 0 && 'is-alert')} onClick={() => applyKpi({ published: 'no' })}>
+          <EyeOff className="pkpi-ic" /><b>{kpis.sinPublicar}</b><span>Sin publicar</span>
+        </button>
+        <div className="pkpi-side">
+          <div><b>{kpis.total}</b> en tu cartera</div>
+          <div><b>{kpis.publicadas}</b> publicada{kpis.publicadas === 1 ? '' : 's'} en tu web</div>
+        </div>
+      </div>
+
+      {capped && (
+        <p className="pnotice">Tenés más propiedades de las que el panel puede traer de una vez: se cargaron las <b>{props.length}</b> más recientes. Los filtros y la búsqueda trabajan sobre esas.</p>
+      )}
+
+      <div className="psearch">
+        <div className="psearch-field">
+          <Search className="psearch-ic" />
+          <input placeholder="Buscar título / ciudad" value={f.text} onChange={(e) => set('text', e.target.value)} />
+          {f.text && <button type="button" className="psearch-x" onClick={() => set('text', '')} aria-label="Limpiar búsqueda"><X className="h-4 w-4" /></button>}
+        </div>
+        <Button variant={showFilters ? 'secondary' : 'outline'} size="sm" onClick={() => setShowFilters((o) => !o)} aria-expanded={showFilters}>
+          <SlidersHorizontal className="h-4 w-4" />Más filtros
+          {activeFilters > 0 && <span className="pfil-badge">{activeFilters}</span>}
+        </Button>
+        <Button variant={f.archived ? 'secondary' : 'outline'} size="sm" onClick={() => setF((s) => ({ ...s, archived: !s.archived }))}>
+          {f.archived ? 'Viendo archivadas' : 'Ver archivadas'}
+        </Button>
+        {dirty && <Button variant="ghost" size="sm" onClick={() => setF({ ...EMPTY_F })}><X className="h-4 w-4" />Limpiar</Button>}
+      </div>
+
+      <div className="filters pfilters" hidden={!showFilters}>
         <Select value={f.op || ALL} onValueChange={(v) => set('op', v === ALL ? '' : v)}>
           <SelectTrigger className="w-auto min-w-[130px]"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -497,17 +368,17 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
         </Select>
         <input type="number" placeholder="Precio máx" value={f.priceMax} onChange={(e) => set('priceMax', e.target.value)} style={{ maxWidth: 120 }} />
         <input type="number" min={1} placeholder="Personas" title="Capacidad exacta: 4 muestra solo las de 4 personas" value={f.capacity} onChange={(e) => set('capacity', e.target.value)} style={{ maxWidth: 120 }} />
-        <label className="date-f">Desde<input type="date" value={f.dateFrom} onChange={(e) => set('dateFrom', e.target.value)} /></label>
-        <label className="date-f">Hasta<input type="date" value={f.dateTo} onChange={(e) => set('dateTo', e.target.value)} /></label>
-        <Button variant={f.archived ? 'secondary' : 'outline'} size="sm" onClick={() => setF((s) => ({ ...s, archived: !s.archived }))}>
-          {f.archived ? 'Viendo archivadas' : 'Ver archivadas'}
-        </Button>
-        {dirty && <Button variant="ghost" size="sm" onClick={() => setF({ ...EMPTY_F })}><X className="h-4 w-4" />Limpiar filtros</Button>}
+        <DateRangePicker from={f.dateFrom} to={f.dateTo} onChange={(dateFrom, dateTo) => setF((s) => ({ ...s, dateFrom, dateTo }))} />
       </div>
       <div className={selected.size > 0 ? 'bulk-bar-wrap open' : 'bulk-bar-wrap'}>
         <div className="bulk-bar-inner">
           <div className="bulk-bar">
             <span><b>{selected.size}</b> seleccionada{selected.size === 1 ? '' : 's'}</span>
+            {canSelectAllMatches && (
+              <button type="button" className="link-btn" onClick={() => setSelected(new Set(displayRows.map((p) => p.id)))}>
+                Seleccionar las {displayRows.length} que coinciden
+              </button>
+            )}
             <Button size="sm" variant="secondary" onClick={() => bulkPatch({ published: true })}>Publicar</Button>
             <Button size="sm" variant="outline" onClick={() => bulkPatch({ published: false })}>Despublicar</Button>
             <Button size="sm" variant="outline" onClick={() => bulkPatch({ status: 'vendida' })}>Marcar como vendida</Button>
@@ -524,56 +395,42 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
           </div>
         </div>
       </div>
-      {filtered.length === 0 ? (
-        <p className="muted">No hay propiedades con esos filtros.</p>
-      ) : isMobile ? (
-        <>
-          <div className="mcard-toolbar">
-            <label className="chk-all"><input type="checkbox" checked={allSel} onChange={toggleAll} /> Todas</label>
-            <Select
-              value={sort ? `${sort.key}:${sort.dir}` : ALL}
-              onValueChange={(v) => { if (v === ALL) { setSort(null); return; } const [k, d] = v.split(':'); setSort({ key: k!, dir: Number(d) as 1 | -1 }); }}
-            >
-              <SelectTrigger className="h-8 w-auto min-w-[150px] text-xs"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>Más recientes</SelectItem>
-                <SelectItem value="price:1">Precio ↑</SelectItem>
-                <SelectItem value="price:-1">Precio ↓</SelectItem>
-                <SelectItem value="title:1">Título A→Z</SelectItem>
-                <SelectItem value="status:1">Estado</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="mcard-list">
-            {sorted.map((p) => (
-              <PropertyMobileCard key={p.id} p={p} branches={branches} checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
-                onManage={() => setManaging(p)} onEdit={() => setEditing(p)} onCalendar={() => setCal(p)} onLightbox={openLightbox} onStats={() => setStats(p)} onReload={reload} />
-            ))}
-          </div>
-        </>
+      <div className="pbar">
+        <label className="chk-all">
+          <input type="checkbox" checked={allSel} onChange={toggleAll} />
+          <span>Todas{displayRows.length > pageRows.length ? ' (esta página)' : ''}</span>
+        </label>
+        <Select
+          value={sort ? `${sort.key}:${sort.dir}` : ALL}
+          onValueChange={(v) => { if (v === ALL) { setSort(null); return; } const [k, d] = v.split(':'); setSort({ key: k!, dir: Number(d) as 1 | -1 }); }}
+        >
+          <SelectTrigger className="h-9 w-auto min-w-[160px] text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL}>Más recientes</SelectItem>
+            <SelectItem value="price:1">Precio ↑</SelectItem>
+            <SelectItem value="price:-1">Precio ↓</SelectItem>
+            <SelectItem value="title:1">Título A→Z</SelectItem>
+            <SelectItem value="status:1">Estado</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="ppager">
+          <span className="ppager-count">{shownFrom}-{shownTo} de {displayRows.length}</span>
+          <button type="button" className="ppager-btn" onClick={() => setPage((n) => Math.max(0, n - 1))} disabled={safePage === 0} aria-label="Página anterior"><ChevronLeft className="h-4 w-4" /></button>
+          <button type="button" className="ppager-btn" onClick={() => setPage((n) => Math.min(pages - 1, n + 1))} disabled={safePage >= pages - 1} aria-label="Página siguiente"><ChevronRight className="h-4 w-4" /></button>
+        </div>
+      </div>
+
+      {displayRows.length === 0 ? (
+        <p className="pempty">No hay propiedades con esos filtros.</p>
       ) : (
-        <div className="sheet">
-          <table className="sheet-tbl">
-            <thead><tr>
-              <th className="c-check"><input type="checkbox" checked={allSel} onChange={toggleAll} title="Seleccionar todas" /></th>
-              <th></th>
-              <th className="th-sort" onClick={() => sortBy('title')}>Propiedad{sortMark('title')}</th>
-              <th className="th-sort" onClick={() => sortBy('operation')}>Op.{sortMark('operation')}</th>
-              <th className="th-sort" onClick={() => sortBy('price')}>Precio{sortMark('price')}</th>
-              <th>Detalle</th>
-              <th className="th-sort" onClick={() => sortBy('branch_name')}>Sucursal{sortMark('branch_name')}</th>
-              <th className="th-sort" onClick={() => sortBy('status')}>Estado{sortMark('status')}</th>
-              <th>Pub.</th><th></th>
-            </tr></thead>
-            <tbody>
-              {sorted.map((p) => (
-                <PropertyRow key={p.id} p={p} branches={branches} expanded={expanded === p.id}
-                  checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
-                  onToggle={() => setExpanded((e) => (e === p.id ? null : p.id))}
-                  onManage={() => setManaging(p)} onEdit={() => setEditing(p)} onCalendar={() => setCal(p)} onLightbox={openLightbox} onStats={() => setStats(p)} onReload={reload} />
-              ))}
-            </tbody>
-          </table>
+        <div className="plist">
+          {pageRows.map((p, i) => (
+            <PropertyRow key={p.id} p={p} index={i} expanded={expanded === p.id}
+              checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
+              onToggle={() => setExpanded((e) => (e === p.id ? null : p.id))}
+              onManage={() => setManaging(p)} onEdit={() => setEditing(p)} onCalendar={() => setCal(p)}
+              onLightbox={openLightbox} onStats={() => setStats(p)} onReload={reload} />
+          ))}
         </div>
       )}
       {showNew && <PropertyForm scope="agency" branches={branches} onClose={() => setShowNew(false)} onSaved={reload} />}

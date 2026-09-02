@@ -1,6 +1,6 @@
 # CoopenPlaces — Software de gestión inmobiliaria + marketplace
 
-> 📌 Vive en `d:/Coopen/Coopen/3-Apps/Places/` dentro del monorepo Coopen.
+> 📌 Vive en `d:/Coopen/Coopen/3-Apps/Internas/Places/` dentro del monorepo Coopen.
 > Para reglas del ecosistema (cuentas CF/Google unificadas, contrato SSO,
 > gotchas globales), leer **`d:/Coopen/CLAUDE.md` §2 y §3 PRIMERO**.
 >
@@ -26,7 +26,7 @@ acá detrás de config o de un flag.
 | Deploy | Dominio | Carpeta con su config/datos |
 |---|---|---|
 | Coopen (el propio) | `places.coopenstudio.com` | esta |
-| **El Muelle** (1er cliente) | `elmuelle.coopenstudio.com` | [`../Clientes/ElMuelle/`](../Clientes/ElMuelle/) |
+| **El Muelle** (1er cliente) | `elmuelle.coopenstudio.com` | [`../../Clientes/ElMuelle/`](../../Clientes/ElMuelle/) |
 
 ## Qué es
 
@@ -254,6 +254,125 @@ trial/pago, y **cuentas de usuario por inmobiliaria** (promover a admin de esa a
 - Temporario/turismo: calendario, tarifas, reservas + pago online.
 - IA: sugerencia de precio + redacción de avisos (puente a *Novah* de Marketing).
 - Publicación a portales externos; permisos finos por rol de agente.
+
+## Estado (2026-08-20 b)
+
+**v0.38 — el Inventario dejó de ser una planilla: ahora es un listado de avisos con la
+forma del panel que la inmobiliaria ya sabe usar.** Pedido de Charly: El Muelle venía de
+**BuscadorProp** (captura con **1000 propiedades** cargadas) y la transición se hace más
+fácil si nuestra pantalla se le parece. Se copió el **formato**, no la funcionalidad que
+no tenemos.
+
+**Qué cambió, de arriba abajo:**
+- **Franja de KPIs** (en venta / en alquiler / temporario / sin publicar + cartera y
+  publicadas). Cada uno es un **filtro de un click** y deja **sólo** ese filtro puesto.
+  Cuenta sobre lo **no archivado**, que es lo que la lista muestra por defecto: sumar las
+  archivadas daría un total que no coincide con nada de la pantalla.
+- **Los 7 filtros se plegaron** detrás de "Más filtros", con un **badge** de cuántos hay
+  puestos. Afuera quedan sólo la búsqueda y "Ver archivadas".
+- **Barra de acciones** con seleccionar-todo, orden y **paginado de a 50**.
+- **La fila**: miniatura con contador de fotos · dirección + `#id` · título grande ·
+  **barra de completitud** · chips (tipo, estado, sin publicar, ambientes/baños/personas/
+  m², visitas) · "Últ. modificación" · precio con su operación · y las acciones en
+  **3 botones** (Editar · Más acciones ▾ · Compartir ▾) en vez de los 8 íconos sueltos.
+  Las filas **sin publicar y archivadas van teñidas**, como en el panel viejo.
+- **La barra de completitud es real**, no decorativa: `lib/completeness.ts` chequea 8
+  cosas (fotos ≥ 3, precio, ciudad, dirección, punto en el mapa, descripción ≥ 120,
+  2 de 3 medidas, 3 comodidades) y el tooltip **dice cuáles faltan**. Todos los ítems
+  pesan igual a propósito, para poder explicar el número ("te faltan 2 de 8").
+
+**Simplificaciones que trajo el rediseño:**
+- **Una sola fila para escritorio y celular** (la grilla se reacomoda por CSS). Se borró
+  `PropertyMobileCard`, que duplicaba las mismas acciones.
+- **`PropertyCard` era código muerto**: era el home del *propietario particular*, rol
+  **eliminado en v0.29**, y no la importaba nadie. Con ella se fueron `SendToClientButton`
+  y `SaleActions` del panel.
+- **78 líneas de CSS muerto** (`.sheet-tbl`, `.mcard*`, `.prop-card*`, `.status-chip`…),
+  borradas contra un barrido de las clases realmente usadas en los `.tsx`, no a ojo.
+- `properties-panel.tsx` pasó de **664 a ~440 líneas**; la fila vive en
+  `components/property-row.tsx` (soft cap de 500 del manual raíz).
+
+**Lo que NO se copió, a propósito:** "Destacar", "Muestra rebaja de precios" e "Imprimir"
+no existen en Places — dibujar un control que no hace nada es peor que no tenerlo. El
+bloque de precios muestra **una** operación (nuestro modelo tiene una por propiedad), no
+las tres con guiones.
+
+**🔴 Gotcha nuevo (y mi primer diagnóstico estaba MAL):** al abrir "Más acciones" el menú
+**se veía cortado** justo en el borde de la fila. Lo atribuí a `overflow: hidden` en
+`.plist` y lo saqué… y **la mutación lo desmintió**: reponer el `overflow` no rompe nada.
+La causa real es el **orden de apilado** — las filas de abajo van después en el DOM y
+pintan su fondo **encima** del popover; que sea `position: absolute` no alcanza contra
+hermanos que también pintan. Lo arregla `.prow:has(.rbtn.is-open) { position: relative;
+z-index: 2 }`. Ojo con el indicador: **el recorte por overflow es de pintado, no de
+layout**, así que medir el `getBoundingClientRect` del popover **no detecta nada** — hay
+que hacer `elementFromPoint` sobre el último ítem. También se cerró el gotcha global del
+manual: **`[hidden] { display: none !important; }`** — sin esa línea `.filters
+{ display: flex }` le ganaba al atributo y los filtros "plegados" se veían igual.
+
+**Cartera grande (lo que el cliente trae):** `/api/properties/mine` sumó `updated_at`,
+subió el tope de **200 → 1000** y ahora devuelve **`capped`**, con el que el panel **avisa
+en pantalla** que hay más de las que trajo — antes truncaba en silencio y el total mentía.
+Medido con **1028 propiedades sembradas**: panel usable en **930 ms**, respuesta de
+**644 KB**, **33 ms por tecla** en la búsqueda (igual que con 128: el costo es pintar 50
+filas, no filtrar) y el paginado cerrando en `951-1000 de 1000`. ⚠️ **Sigue siendo
+paginado y filtrado del lado del cliente**: pasadas las 1000 hay que llevar filtros y
+paginado al server.
+
+**Seguridad de la selección:** con paginado, "Todas" marcando las 1000 mientras ves 50 es
+una trampa (la barra masiva tiene **Eliminar**). Ahora **marca la página** —el label dice
+"Todas (esta página)"— y la barra masiva ofrece el link explícito *"Seleccionar las N que
+coinciden"*.
+
+Detalles del manual §6: **cero emoji como iconografía** en el listado (pasaron a SVG de
+lucide, con el nombre del dato en `title` + `.sr` para lectores de pantalla — de paso se
+fue el "1 baños"), radios concéntricos, `tabular-nums` en todo número, outline negro puro
+en las fotos, `text-wrap: balance` en los títulos, `scale(.96)` al apretar y entrada
+escalonada cortada a las 12 primeras filas.
+
+Verificado contra `wrangler dev` + D1 local: typecheck y build limpios, **1920 / 1440 /
+390 sin errores de consola**, barrido de **las 11 pestañas** del panel tras borrar el CSS
+(ninguna se rompió), y **cuatro comprobaciones por mutación** (completitud 50→63 %,
+`[hidden]`, el z-index del menú, y "Todas" 50→1000). ⚠️ Desborde de 2 px a 390 en "Nueva
+propiedad": **preexistente**, no se tocó. ⚠️ Visto de paso y **no arreglado**: Contratos y
+otras pestañas siguen usando emoji como ícono (§6).
+
+## Estado (2026-08-20)
+
+**v0.37 — la vuelta del diseñador: tipos de propiedad, comodidades de costa y el filtro
+de fechas por almanaque.** El diseñador (Tomy) trabajó sobre **una copia** y la devolvió
+en `Clientes/Update/`. ⚠️ Esa copia salió del commit `02f2e825` (**2026-08-02, 18 commits
+atrás**) y venía con el SSO de CoopenAuth arrancado, `wrangler.toml` apuntando a **su**
+cuenta de Cloudflare / su D1 / su OAuth client, y sin el bloque `[env.elmuelle]`: copiarla
+encima habría **borrado dos semanas de trabajo y roto El Muelle**. Se integró **a mano
+sólo lo que era mejora** (6 archivos, +143/-11), descartando toda la adaptación a su
+entorno. Lo que entró:
+- **Tipos de propiedad** (`PROPERTY_KINDS`): el "Tipo" pasó de input libre a desplegable
+  con 8 opciones (Casas/Chalet, Duplex/Triplex, Departamento, PH, Lotes, Locales, Cabañas,
+  Apart) **+ "Agregar tipo nuevo…"**. La columna `kind` **sigue siendo texto libre a
+  propósito** (sin CHECK ni enum): un valor que no esté en la lista —dato viejo o
+  importado de Argenprop— se agrega como opción extra en vez de perderse.
+- **5 comodidades** que pedía la operación de costa: gas envasado (a cargo del inquilino),
+  TV por DirecTV prepago, heladera/freezer, microondas, ventilador. Van en las **dos**
+  listas (`client/lib/amenities.ts` y `worker/lib/amenities.ts`), que son espejo.
+- **Filtro de fechas por almanaque** (`DateRangePicker`): los dos `<input type=date>` del
+  Inventario pasaron a un popover clickeable. Se **corrigió** respecto de la entrega para
+  que el orden no importe (clickear 20 y después 10 da 10→20), igual que el calendario de
+  reservas — son dos almanaques en la misma app y el gesto tiene que ser el mismo.
+- **⚠️ Cambio de comportamiento (decisión de Charly, 2026-08-20):** buscar por fechas
+  **ya no filtra por "Disponible desde/hasta"**. Ese campo es la temporada habitual del
+  anuncio, no un bloqueo: ahora sólo se excluye la propiedad que tenga una **reserva
+  solapada**. Efecto medido: una casa con temporada Dic→Mar buscada en octubre pasó de
+  no aparecer (7 de 8) a aparecer (8 de 8).
+- Y como el filtro ya saca del listado a lo reservado en el rango, **el chip de Estado
+  ahora dice "Disponible"** cuando hay fechas activas: mostrar "Reservada" por una reserva
+  de otro mes confundía. La entrega traía acá dos ramas (`alquilada`/`reservada`)
+  **inalcanzables** —el filtro de arriba ya las había descartado—; se simplificó.
+
+Verificado contra `wrangler dev` + D1 local: typecheck y build limpios, render a
+**1920 / 1440 / 390 sin errores de consola**, y los tres comportamientos **comprobados por
+mutación** (romper cada arreglo a propósito y ver fallar el chequeo que corresponde).
+⚠️ Desborde de 2 px a 390 en el botón "Nueva propiedad" del `.panel-head`: **preexistente**,
+no se tocó. **Falta deployar** (los dos deploys: Coopen y El Muelle).
 
 ## Estado (2026-08-07)
 
@@ -512,7 +631,7 @@ consulta `/api/auth/coopen-config` y manda al camino disponible. Desplegado en E
 (`fa9ba787`) y verificado: el logout devuelve las 3 cookies con `Max-Age=0`.
 
 **v0.28 — de vuelta en el monorepo, con SSO restaurado y white-label.** El código que
-estuvo fuera (v0.27, con `0011`–`0014`) volvió a `3-Apps/Places` y se le sumó el **SSO de
+estuvo fuera (v0.27, con `0011`–`0014`) volvió a `3-Apps/Internas/Places` y se le sumó el **SSO de
 CoopenAuth como cuarto camino de sesión** (`resolveCoopenUser`, modelo C, opt-in por la
 var `AUTH_URL`) + endpoints `/api/auth/coopen-config` y `/api/auth/coopen`. El login
 propio y el link de agencia **quedaron intactos**: un deploy white-label que no setea
