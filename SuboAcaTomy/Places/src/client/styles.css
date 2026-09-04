@@ -461,16 +461,6 @@ input, select, textarea { color: var(--fg); }
 .loc-map { height: 260px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #e9e0d0; }
 .loc-map .leaflet-container { height: 100%; width: 100%; font: inherit; }
 
-/* Compartir en redes */
-.share-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-.share-opt { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 16px 8px; border-radius: 12px; border: 1px solid var(--line); background: var(--panel); font-weight: 600; font-size: 14px; cursor: pointer; transition: border-color .12s, background .12s; }
-.share-opt span { font-size: 26px; line-height: 1; }
-.share-opt.wa:hover { border-color: #1fab54; background: #eafaf0; }
-.share-opt.fb:hover { border-color: #1877f2; background: #eaf2fe; }
-.share-opt.ig:hover { border-color: #d6249f; background: #fdeef6; }
-.share-opt.lk:hover { border-color: var(--accent); background: var(--bg); }
-.share-warn { background: #fdf3d8; border: 1px solid #ecd9a0; color: #8a6a12; border-radius: 10px; padding: 9px 12px; font-size: 13px; margin: 0 0 12px; }
-
 /* Botón redondo para responder una consulta por WhatsApp */
 .wa-icon-btn { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: #1fab54; flex-shrink: 0; transition: border-color .12s, background .12s, color .12s; }
 .wa-icon-btn:hover { border-color: #1fab54; background: #eafaf0; color: #178a43; }
@@ -732,6 +722,8 @@ input, select, textarea { color: var(--fg); }
 .rbtn:hover { border-color: var(--accent); background: var(--bg); }
 .rbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .rbtn:active { scale: .96; }
+.rbtn:disabled { opacity: .45; cursor: not-allowed; }
+.rbtn:disabled:hover { border-color: var(--line); background: var(--panel); }
 .rbtn.is-open { border-color: var(--accent); background: var(--bg); }
 .rbtn.is-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .rbtn.is-primary:hover { background: var(--accent-d); border-color: var(--accent-d); }

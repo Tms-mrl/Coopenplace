@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Calendar as CalendarIcon, ChevronLeft, ChevronRight, Download, EyeOff,
-  Search, SlidersHorizontal, Tag, X,
+  Search, Share2, SlidersHorizontal, Tag, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { cn } from '../lib/cn';
@@ -170,11 +170,17 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
   const [showFilters, setShowFilters] = useState(false);
   const [page, setPage] = useState(0);
   const [capped, setCapped] = useState(false);
+  // Texto que la inmobiliaria escribió en Configuración: precede al/los link(s) al compartir.
+  const [shareMessage, setShareMessage] = useState('');
 
   const load = () => api<{ properties: Property[]; capped?: boolean }>('/api/properties/mine')
     .then((r) => { setProps(r.properties); setCapped(!!r.capped); })
     .catch(() => {});
-  useEffect(() => { load(); prefetchClients(); }, []);
+  useEffect(() => {
+    load();
+    prefetchClients();
+    api<{ shareMessage?: string }>('/api/site').then((r) => setShareMessage(r.shareMessage || '')).catch(() => {});
+  }, []);
   useEffect(() => {
     if (!preset) return;
     setF({ ...EMPTY_F, status: preset.status || '', branch: preset.branch != null ? String(preset.branch) : '', op: preset.op || '', published: preset.published || '' });
@@ -191,6 +197,19 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
     if (!(await confirm(`¿Eliminar ${selected.size} propiedad(es)? No se puede deshacer.`, { destructive: true, confirmLabel: 'Eliminar' }))) return;
     await Promise.all([...selected].map((id) => api(`/api/properties/${id}`, { method: 'DELETE' }).catch(() => {})));
     setSelected(new Set()); reload();
+  }
+  // Compartir varios avisos en un solo mensaje de WhatsApp: el texto de Configuración una
+  // vez y después un link por bloque (WhatsApp arma una preview por URL). No muta nada, así
+  // que no limpia la selección.
+  async function bulkShare() {
+    const chosen = props.filter((p) => selected.has(p.id));
+    const withUrl = chosen.filter((p) => p.external_url);
+    if (!withUrl.length) { toast('Ninguna de las seleccionadas tiene link cargado', 'err'); return; }
+    if (withUrl.length > 15 && !(await confirm(`Vas a compartir ${withUrl.length} links en un mensaje. WhatsApp puede recortar los mensajes largos. ¿Seguir?`))) return;
+    const skipped = chosen.length - withUrl.length;
+    if (skipped) toast(`${skipped} sin link: no se ${skipped === 1 ? 'incluyó' : 'incluyeron'}`, 'ok');
+    const text = [shareMessage.trim(), ...withUrl.map((p) => p.external_url as string)].filter(Boolean).join('\n\n');
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
   }
 
   async function openLightbox(p: Property) {
@@ -379,6 +398,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
                 Seleccionar las {displayRows.length} que coinciden
               </button>
             )}
+            <Button size="sm" variant="secondary" onClick={bulkShare}><Share2 className="h-4 w-4" />Compartir por WhatsApp</Button>
             <Button size="sm" variant="secondary" onClick={() => bulkPatch({ published: true })}>Publicar</Button>
             <Button size="sm" variant="outline" onClick={() => bulkPatch({ published: false })}>Despublicar</Button>
             <Button size="sm" variant="outline" onClick={() => bulkPatch({ status: 'vendida' })}>Marcar como vendida</Button>
@@ -425,7 +445,7 @@ export function PropertiesPanel({ branches, onChanged, preset }: { branches: Bra
       ) : (
         <div className="plist">
           {pageRows.map((p, i) => (
-            <PropertyRow key={p.id} p={p} index={i} expanded={expanded === p.id}
+            <PropertyRow key={p.id} p={p} index={i} expanded={expanded === p.id} shareMessage={shareMessage}
               checked={selected.has(p.id)} onSelect={() => toggleSel(p.id)}
               onToggle={() => setExpanded((e) => (e === p.id ? null : p.id))}
               onManage={() => setManaging(p)} onEdit={() => setEditing(p)} onCalendar={() => setCal(p)}

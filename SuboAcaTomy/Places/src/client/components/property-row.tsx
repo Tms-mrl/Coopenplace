@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   BarChart3, Bath, BedDouble, Calendar as CalendarIcon, Camera, Check, ChevronDown,
-  ExternalLink, Eye, EyeOff, Home, Link as LinkIcon, MoreHorizontal, Pencil, Ruler,
-  Send, Share2, Trash2, User, Users,
+  Eye, EyeOff, Home, Link as LinkIcon, MoreHorizontal, Pencil, Ruler,
+  Share2, Trash2, User, Users,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import { cn } from '../lib/cn';
@@ -10,11 +10,8 @@ import { mediaUrl, money, PERIOD_SUFFIX, type Property } from '../lib/types';
 import { AMENITIES, parseAmenities } from '../lib/amenities';
 import { completeness, completenessHint, completenessTone } from '../lib/completeness';
 import { toast } from '../lib/toast';
-import { AskModal } from './property-form';
-import { ShareModal } from './share-button';
 import { useConfirm } from './ui/use-confirm';
 
-const origin = typeof window !== 'undefined' ? window.location.origin : '';
 const AMEN_MAP = new Map(AMENITIES.map((a) => [a.key, a]));
 
 const STATUS_COLOR: Record<string, string> = {
@@ -38,14 +35,6 @@ function fmtDateTime(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return iso;
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-function waLink(numRaw: string, p: Property): string {
-  const digits = numRaw.replace(/\D/g, '');
-  const facts = [p.rooms ? `${p.rooms} amb` : null, p.capacity ? `${p.capacity} personas` : null, p.area_m2 ? `${p.area_m2} m²` : null].filter(Boolean).join(' · ');
-  const loc = [p.city, p.province].filter(Boolean).join(', ');
-  const msg = `¡Hola! Te paso la info de esta propiedad:\n\n🏡 ${p.title}\n💵 ${money(p.price, p.currency, p.price_period)}${loc ? `\n📍 ${loc}` : ''}${facts ? `\n${facts}` : ''}\n\nVer más: ${origin}/propiedad/${p.id}`;
-  return `https://wa.me/${digits}?text=${encodeURIComponent(msg)}`;
 }
 
 // ── Menú desplegable de la fila ──────────────────────────────────────────────
@@ -81,25 +70,15 @@ function MenuItem({ icon, children, onClick, danger }: { icon: ReactNode; childr
   );
 }
 
-function MenuLink({ icon, children, href }: { icon: ReactNode; children: ReactNode; href: string }) {
-  return (
-    <a role="menuitem" className="rmenu-item" href={href} target="_blank" rel="noreferrer">
-      {icon}<span>{children}</span>
-    </a>
-  );
-}
-
 // ── La fila ──────────────────────────────────────────────────────────────────
 // UNA sola versión para escritorio y celular: el layout es grid y se reacomoda por CSS.
 // Antes había dos componentes (tabla + card mobile) con las mismas acciones duplicadas.
-export function PropertyRow({ p, index, expanded, checked, onSelect, onToggle, onManage, onEdit, onCalendar, onLightbox, onStats, onReload }: {
-  p: Property; index: number; expanded: boolean; checked: boolean; onSelect: () => void; onToggle: () => void;
+export function PropertyRow({ p, index, expanded, checked, shareMessage, onSelect, onToggle, onManage, onEdit, onCalendar, onLightbox, onStats, onReload }: {
+  p: Property; index: number; expanded: boolean; checked: boolean; shareMessage: string; onSelect: () => void; onToggle: () => void;
   onManage: () => void; onEdit: () => void; onCalendar: () => void; onLightbox: (p: Property) => void; onStats: () => void; onReload: () => void;
 }) {
   const confirm = useConfirm();
   const [copied, setCopied] = useState(false);
-  const [share, setShare] = useState(false);
-  const [sendTo, setSendTo] = useState(false);
 
   async function patch(body: Record<string, unknown>) {
     try { await api(`/api/properties/${p.id}`, { method: 'PATCH', body: JSON.stringify(body) }); onReload(); }
@@ -111,12 +90,15 @@ export function PropertyRow({ p, index, expanded, checked, onSelect, onToggle, o
     catch (e) { toast(String((e as Error).message), 'err'); }
   }
   function copyLink() {
-    navigator.clipboard?.writeText(`${origin}/propiedad/${p.id}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600); }, () => {});
+    if (!p.external_url) return;
+    navigator.clipboard?.writeText(p.external_url).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600); }, () => {});
   }
-  function sendFicha(num: string) {
-    if (num.replace(/\D/g, '').length < 8) { toast('Número inválido (con código de país)', 'err'); return; }
-    setSendTo(false);
-    window.open(waLink(num, p), '_blank');
+  // wa.me sin número → WhatsApp abre el selector de contacto. El texto es el que la
+  // inmobiliaria escribió en Configuración y abajo el link del aviso.
+  function shareWhatsApp() {
+    if (!p.external_url) return;
+    const text = [shareMessage.trim(), p.external_url].filter(Boolean).join('\n\n');
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener');
   }
 
   const c = completeness(p);
@@ -212,12 +194,15 @@ export function PropertyRow({ p, index, expanded, checked, onSelect, onToggle, o
           <MenuItem icon={<Trash2 className="h-4 w-4" />} danger onClick={del}>Eliminar</MenuItem>
         </RowMenu>
 
-        <RowMenu label="Compartir" icon={<Share2 className="h-3.5 w-3.5" />}>
-          <MenuItem icon={<Send className="h-4 w-4" />} onClick={() => setSendTo(true)}>Enviar ficha por WhatsApp</MenuItem>
-          <MenuItem icon={<Share2 className="h-4 w-4" />} onClick={() => setShare(true)}>Compartir en redes</MenuItem>
-          <MenuItem icon={copied ? <Check className="h-4 w-4" /> : <LinkIcon className="h-4 w-4" />} onClick={copyLink}>{copied ? 'Link copiado ✓' : 'Copiar link'}</MenuItem>
-          <MenuLink icon={<ExternalLink className="h-4 w-4" />} href={`/propiedad/${p.id}`}>Ver publicación</MenuLink>
-        </RowMenu>
+        <button type="button" className="rbtn" onClick={shareWhatsApp} disabled={!p.external_url}
+          title={p.external_url ? 'Compartir por WhatsApp' : 'Falta el link del aviso — cargalo en Editar'}>
+          <Share2 className="h-3.5 w-3.5" /><span>Compartir</span>
+        </button>
+        <button type="button" className="rbtn" onClick={copyLink} disabled={!p.external_url}
+          title={p.external_url ? 'Copiar el link del aviso' : 'Falta el link del aviso — cargalo en Editar'}>
+          {copied ? <Check className="h-3.5 w-3.5" /> : <LinkIcon className="h-3.5 w-3.5" />}
+          <span>{copied ? 'Copiado ✓' : 'Copiar link'}</span>
+        </button>
       </div>
 
       {expanded && (
@@ -243,11 +228,6 @@ export function PropertyRow({ p, index, expanded, checked, onSelect, onToggle, o
         </div>
       )}
 
-      {share && <ShareModal p={p} onClose={() => setShare(false)} />}
-      {sendTo && (
-        <AskModal title="Enviar ficha al cliente" label="WhatsApp del cliente (con código de país)"
-          placeholder="5493415551234" cta="Enviar por WhatsApp" onSubmit={sendFicha} onClose={() => setSendTo(false)} />
-      )}
     </article>
   );
 }

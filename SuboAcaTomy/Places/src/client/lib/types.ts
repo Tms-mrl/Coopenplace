@@ -41,6 +41,8 @@ export type Property = {
   city: string | null;
   province: string | null;
   address: string | null;
+  /** URL del aviso en el sitio propio del cliente. Es lo que se comparte por WhatsApp. */
+  external_url: string | null;
   description: string | null;
   lat: number | null;
   lng: number | null;
